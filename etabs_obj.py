@@ -1,4 +1,4 @@
-import comtypes.client
+#import comtypes.client
 comtypes.client.gen_dir = None
 from pathlib import Path
 from typing import Tuple, Union
