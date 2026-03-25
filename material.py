@@ -17,6 +17,9 @@ class Material:
 
     def material_type(self, name):
         return self.SapModel.PropMaterial.GetTypeOAPI(name)[0]
+    
+    def get_all_rebars(self):
+        return self.SapModel.PropRebar.GetNameList()[1]
 
     def get_material_of_type(self, type_):
         '''
@@ -30,6 +33,21 @@ class Material:
 
     def get_rebar_fy_fu(self, rebar):
         return self.SapModel.PropMaterial.GetORebar(rebar)[0:2]
+    
+    def get_steel_fy_fu(self, steel):
+        return self.SapModel.PropMaterial.GetOSteel(steel)[0:2]
+    
+    def get_frame_steel_fy_fu(self,
+                              frame_name: str,
+                              unit: tuple= ("kgf", 'cm'),
+                              ):
+        if unit is not None:
+            self.etabs.set_current_unit(*unit)
+        material = self.etabs.prop_frame.get_material(frame_name)
+        if material is not None and self.material_type(material) == 1:
+            ret = self.SapModel.PropMaterial.GetOSteel(material)
+            return ret[:2]
+        return None
 
     @change_unit('N', 'mm')
     def get_S340_S400_rebars(self):
@@ -57,8 +75,14 @@ class Material:
         tie_rebar_sizes = set()
         main_rebar_sizes = set()
         all_rebars = {}
-        rebars = self.SapModel.PropRebar.GetNameListWithData()
-        for name, size in zip(rebars[1], rebars[3]):
+        rebar_names = self.get_all_rebars()
+        for name in rebar_names:
+            if self.etabs.software == "ETABS":
+                size = self.SapModel.PropRebar.GetRebarProps(name)[1]
+            elif self.etabs.software == "SAP2000":
+                size = self.SapModel.PropRebar.GetProp(name)[1]
+
+        # for name, size in zip(rebars[1], rebars[3]):
             if not name.startswith('#') or not name.endswith('M') and int(size) == size:
                 size = int(size)
                 if  size in [10, 12]:
@@ -113,5 +137,61 @@ class Material:
         df = df.astype({'UnitWeight': float})
         df = df.set_index('Material')
         return df.to_dict()['UnitWeight']
+    
+    @change_unit(force='N', length='mm')
+    def add_concrete(self,
+                     name: str,
+                     fc: float,
+                     is_lightweight: bool=False,
+                     fcs_factor: float=1,
+                     ss_type: int=2,
+                     ssh_ys_type: int=4,
+                     strain_at_fc: float=0.002219,
+                     strain_ultimate: float=.005,
+                     weight_for_calculate_ec: float=0,
+                     ):
+        self.add_material(name, type_=2)
+        if weight_for_calculate_ec == 0:
+            par = 4700
+        else:
+            par = 0.043 * weight_for_calculate_ec ** 1.5
+        ec = par * fc ** 0.5
+        self.SapModel.PropMaterial.SetMPIsotropic(name, ec, 0.2, 0.0000055)
+        self.SapModel.PropMaterial.SetOConcrete(name, fc, is_lightweight, fcs_factor, ss_type, ssh_ys_type, strain_at_fc, strain_ultimate)
+        self.etabs.set_current_unit('kgf', 'm')
+        self.SapModel.PropMaterial.SetWeightAndMass(name, 1, 2500)
 
+    @change_unit(force='N', length='mm')
+    def add_rebar(self,
+                  name: str,
+                  fy: int,
+                  fu: int,
+    ):
+        ry = 1.25
+        e = 2e5
+        nu = 0.2
+        a = 0.0000117
+        self.add_material(name, type_=6)
+        self.SapModel.PropMaterial.SetMPIsotropic(name, e, nu, a)
+        self.SapModel.PropMaterial.SetORebar(name, fy, fu, ry * fy, ry * fu, 1, 1, 0.01, 0.09, False)
+        self.etabs.set_current_unit('kgf', 'm')
+        self.SapModel.PropMaterial.SetWeightAndMass(name, 1, 7850)
+    
+    @change_unit(force='N', length='mm')
+    def add_steel(self,
+                  name: str,
+                  fy: int,
+                  fu: int,
+    ):
+        ry = 1.25
+        e = 2e5
+        nu = 0.2
+        a = 0.0000117
+        self.add_material(name, type_=1)
+        self.SapModel.PropMaterial.SetMPIsotropic(name, e, nu, a)
+        self.SapModel.PropMaterial.SetOSteel_1(name, fy, fu, ry * fy, ry * fu, 1, 1, 0.015, 0.11, 0.17, -0.1)
+        self.etabs.set_current_unit('kgf', 'm')
+        self.SapModel.PropMaterial.SetWeightAndMass(name, 1, 7850)
+
+    
         

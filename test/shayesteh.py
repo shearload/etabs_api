@@ -1,18 +1,21 @@
 import os
 from pathlib import Path
+from typing import Union
 import tempfile
 
 import etabs_obj
 
-global etabs
-global open_model
-version = int(os.environ.get('version', 21))
+# global etabs
+# global open_model
+version = int(os.environ.get('software_version', 21))
+software = str(os.environ.get('software_name', "ETABS"))
 
 test_folder = Path(__file__).parent
 
 def etabs_model(
-        edb: str="shayesteh.EDB",
+        filename: Union[str, None]= None,
         version: int=0, # 19, 20, 21
+        software: Union[str, None]='ETABS',
         ):
     '''
     version 0 means that we can connect to register and openning etabs, it is not
@@ -20,23 +23,33 @@ def etabs_model(
     '''
     # if version == 21:
     #     return None, None
-    suffix = edb.split('.')[1]
-    if suffix == 'EDB':
-        software = 'ETABS'
-    elif suffix == 'FDB':
-        software = 'SAFE'
+    if software is None:
+        software = str(os.environ.get('software_name', "ETABS"))
+    if filename is None:
+        if software == "ETABS":
+            filename = "shayesteh.EDB"
+        elif software == 'SAFE':
+            filename = "shayeste.EDB"
+        elif software == 'SAP2000':
+            filename = "sap2000.SDB"
+    suffix = filename.split('.')[1]
+    # if suffix.lower() == 'edb':
+    #     software = 'ETABS'
+    # elif suffix.lower() == 'fdb':
+    # elif suffix.lower() == 'sdb':
+    #     software = 'SAP2000'
     new_instance = False
     try:
-        etabs = etabs_obj.EtabsModel(backup=False)
+        etabs = etabs_obj.EtabsModel(backup=False, software=software)
         if etabs.success:
             if version != 0 and etabs.etabs_main_version != version:
                 raise FileNotFoundError
             filename = etabs.SapModel.GetModelFilename()
             if not filename:
-                open_model(etabs, edb)
+                open_model(etabs, filename)
                 filename = etabs.SapModel.GetModelFilename()
             filepath = Path(filename)
-            if 'test.' in filepath.name:
+            if f'test{version}.' in filepath.name:
                 return etabs, new_instance
             else:
                 return create_test_file(etabs, suffix=suffix), new_instance
@@ -46,7 +59,7 @@ def etabs_model(
         etabs = etabs_obj.EtabsModel(
                 attach_to_instance=False,
                 backup = False,
-                model_path = Path(__file__).parent / 'files' / edb,
+                model_path = Path(__file__).parent / 'files' / filename,
                 software_exe_path=rf'G:\program files\Computers and Structures\{software} {version}\{software}.exe'
             )
         new_instance = True
@@ -97,11 +110,23 @@ etabs, new_instance = etabs_model(version=version)
 def open_etabs_file(filename: str):
     def _outer(func):
         def _inner(*args, **kwargs):
+            software = os.environ.get('software_name', "ETABS")
+            if filename.lower().endswith(".sdb"):
+                software_name = "SAP2000"
+                version = 0
+            elif filename.lower().endswith(".edb"):
+                software_name = "ETABS"
+                version = int(os.environ.get('software_version', 21))
+            elif filename.lower().endswith(".fdb"):
+                software_name = "SAFE"
+                version = int(os.environ.get('software_version', 21))
+            os.environ.setdefault('software_name', software_name)
             if 'etabs' not in dir(__builtins__):
-                etabs, _ = etabs_model(version=version)
+                etabs, _ = etabs_model(version=version, software=software_name)
             open_model(etabs, filename)
             response = func(*args, **kwargs)
             purge_test_folder()
+            os.environ.setdefault('software_name', software)
             return response
         return _inner
     return _outer

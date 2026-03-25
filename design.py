@@ -11,6 +11,8 @@ from typing import Union
 import pandas as pd
 pd.options.mode.chained_assignment = None
 
+from python_functions import change_unit
+
 
 __all__ = ['Design']
 
@@ -334,8 +336,18 @@ class Design:
         beams, columns = self.etabs.frame_obj.get_beams_columns()
         self.etabs.frame_obj.assign_frame_modifiers(
             frame_names=beams + columns,
+            area=1,
+            as2=1,
+            as3=1,
+            # torsion=1,
             i22=1,
             i33=1,
+        )
+        # Multiply j of beams and columns with 1.4
+        print("Multiply j of beams and columns with 1.4")
+        self.etabs.frame_obj.multiply_modifiers(
+            mult=[1, 1, 1, 1.4, 1, 1, 1, 1],
+            frame_names=beams + columns,
         )
         print("Set Slab stiffness modifiers ...")
         self.etabs.area.assign_slab_modifiers(m11=1, m22=1, m12=1, reset=True)
@@ -423,6 +435,22 @@ class Design:
             deflections2.append(abs(def2))
         self.etabs.set_current_unit(*units)
         return deflections1, deflections2, texts
+    
+    @change_unit('kgf', 'm')
+    def get_concrete_columns_pmm_table(self,
+                                       columns: Union[list, None]=['Story',	'Label', 'UniqueName', 'DesignSect', 'PMMRatio', 'PMMCombo', 'Station']
+                                       ):
+        self.etabs.start_design(type_ = 'Concrete')
+        table_key = self.etabs.database.table_name_that_containe("Concrete Column Design Summary")
+        if table_key is None:
+            return None
+        if columns is not None:
+            df = self.etabs.database.read(table_key, to_dataframe=True, cols=columns)
+        else:
+            df = self.etabs.database.read(table_key, to_dataframe=True)
+        cols = ['PMMRatio', 'Station']
+        df[cols] = df[cols].astype(float).round(2)
+        return df
         
 def get_deflection_check_result(
     def1: float,

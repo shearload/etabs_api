@@ -35,6 +35,17 @@ def test_get_etabs_main_version():
     ver = etabs.get_etabs_main_version()
     assert ver == version
 
+@open_etabs_file('sap2000.sdb')
+def test_get_sap_main_version():
+    import os
+    software = os.environ.get('software_name', "ETABS")
+    os.environ.setdefault('software_name', "SAP2000")
+    ver = etabs.get_etabs_main_version()
+    assert ver == version
+    os.environ.setdefault('software_name', software)
+
+
+
 @open_etabs_file('shayesteh.EDB')
 def test_get_filename_with_suffix():
     name = etabs.get_filename_with_suffix()
@@ -95,6 +106,11 @@ def test_apply_cfactor_to_edb():
     ret = etabs.SapModel.Analyze.RunAnalysis()
     assert NumFatalErrors == 0
     assert ret == 0
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_file_name_without_suffix():
+    name = etabs.get_file_name_without_suffix()
+    assert name == f'test{version}'
 
 @open_etabs_file('shayesteh.EDB')
 def test_apply_cfactors_to_edb():
@@ -209,9 +225,32 @@ def test_get_story_stiffness_modal_way():
             )
 
 @open_etabs_file('shayesteh.EDB')
+def test_get_story_stiffness_2800_way():
+    story_stiffness = etabs.get_story_stiffness_2800_way()
+    assert len(story_stiffness) == 5
+    desired_story_stiffness = {
+         'STORY1': [6099792.60705136, 5693139.766581269],
+         'STORY2': [9272997.032640949, 8692628.650904033],
+         'STORY3': [6838074.398249453, 6475425.75924367],
+         'STORY4': [4512024.545413528, 4195334.78771606],
+         'STORY5': [975333.8079957867, 1225925.8805212637],
+         }
+    for story, stiff in story_stiffness.items():
+        np.testing.assert_almost_equal(
+            [i / 10e4 for i in stiff],
+            [i / 10e4 for i in desired_story_stiffness[story]],
+            decimal=0,
+            )
+
+@open_etabs_file('shayesteh.EDB')
 def test_set_current_unit():
     etabs.set_current_unit('kgf', 'm')
     assert etabs.SapModel.GetPresentUnits_2()[:-1] == [5, 6, 2]
+    assert etabs.SapModel.GetPresentUnits() == 8
+
+@open_etabs_file('sap2000.sdb')
+def test_set_current_unit_sap():
+    etabs.set_current_unit('kgf', 'm')
     assert etabs.SapModel.GetPresentUnits() == 8
 
 @open_etabs_file('shayesteh.EDB')
@@ -263,6 +302,19 @@ def test_angles_response_spectrums_analysis():
         assert pytest.approx(scale, abs=.001) == 1
     print(df)
 
+@open_etabs_file('akhondzadeh.EDB')
+def test_angles_response_spectrums_analysis_two_systems():
+    scales, df = etabs.angles_response_spectrums_analysis(
+        ex_name=['EX', 'EXb'],
+        ey_name=['EY', 'EYb'],
+        specs=['SPEC0', 'SPEC10', 'SPEC20', 'SPEC30', 'SPEC40', 'SPEC50', 'SPEC60', 'SPEC70', 'SPEC80', 'SPEC90', 'SPEC100', 'SPEC110', 'SPEC120', 'SPEC130', 'SPEC140', 'SPEC150', 'SPEC160', 'SPEC170'],
+        section_cuts=['SEC0', 'SEC10', 'SEC20', 'SEC30', 'SEC40', 'SEC50', 'SEC60', 'SEC70', 'SEC80', 'SEC90', 'SEC100', 'SEC110', 'SEC120', 'SEC130', 'SEC140', 'SEC150', 'SEC160', 'SEC170'],
+        analyze=False,
+    )
+    for scale in scales:
+        assert pytest.approx(scale, abs=.001) == 1
+    print(df)
+
 @open_etabs_file('shayesteh.EDB')
 def test_scale_response_spectrums():
     for force in ('kgf',): #, 'N', 'KN'):
@@ -304,6 +356,125 @@ def test_scale_response_spectrums():
                 np.testing.assert_almost_equal(v / vey, 0.9, decimal=2)
             force = etabs.get_current_unit()[0]
             load_cases = [ex_name, ey_name] + x_specs + y_specs
+            base_shear = [vex, vey] + vsx + vsy
+            ratios = [1, 1] + [vx / vex for vx in vsx] + [vy / vey for vy in vsy]
+            final_scales = [1, 1] # Get final scales that applied in etabs model
+            for name in x_specs + y_specs:
+                ret = etabs.SapModel.LoadCases.ResponseSpectrum.GetLoads(name)
+                final_scales.append(ret[3][0])
+            df1 = pd.DataFrame({
+                'Case': load_cases,
+                f'V ({force})': base_shear,
+                'Ratio': ratios,
+                'Scale': final_scales,
+                })
+            # Assert equality between the two DataFrames
+            cols = [f'V ({force})', 'Ratio', 'Scale']
+            np.testing.assert_allclose(df1[cols].values, df[cols].values, rtol=1e-3, atol=1e-3)
+
+@open_etabs_file('two_earthquakes.EDB')
+def test_scale_response_spectrums_two_earthquakes():
+    for force in ('kgf',): #, 'N', 'KN'):
+        for length in ('m',): #, 'mm', 'cm'):
+            etabs.set_current_unit(force, length)
+            print(f'Units: {force=}, {length=}')
+            ex_name=['EX1', 'EX2']
+            ey_name=['EY1', 'EY2']
+            x_specs=['SPECX']
+            y_specs=['SPECY']
+            x_scales, y_scales, df = etabs.scale_response_spectrums(
+                ex_name=ex_name,
+                ey_name=ey_name,
+                x_specs=x_specs,
+                y_specs=y_specs,
+                analyze=False,
+            )
+            for scale in x_scales + y_scales:
+                assert pytest.approx(scale, abs=.001) == 1
+            # Test base reactions
+            V = etabs.results.get_base_react(
+                    loadcases=ex_name + ey_name,
+                    directions=['x'] * len(ex_name) + ['y'] * len(ey_name),
+                    absolute=True,
+                    )
+            vex = sum(V[0: len(ex_name)])
+            vey = sum(V[len(ex_name):])
+            vsx = etabs.results.get_base_react(
+                    loadcases=x_specs,
+                    directions=['x'] * len(x_specs),
+                    absolute=True,
+                    )
+            vsy = etabs.results.get_base_react(
+                    loadcases=y_specs,
+                    directions=['y'] * len(y_specs),
+                    absolute=True,
+            )
+            for v in vsx:
+                np.testing.assert_almost_equal(v / vex, 0.9, decimal=2)
+            for v in vsy:
+                np.testing.assert_almost_equal(v / vey, 0.9, decimal=2)
+            force = etabs.get_current_unit()[0]
+            load_cases = ['&'.join(ex_name),  '&'.join(ey_name)] + x_specs + y_specs
+            base_shear = [vex, vey] + vsx + vsy
+            ratios = [1, 1] + [vx / vex for vx in vsx] + [vy / vey for vy in vsy]
+            final_scales = [1, 1] # Get final scales that applied in etabs model
+            for name in x_specs + y_specs:
+                ret = etabs.SapModel.LoadCases.ResponseSpectrum.GetLoads(name)
+                final_scales.append(ret[3][0])
+            df1 = pd.DataFrame({
+                'Case': load_cases,
+                f'V ({force})': base_shear,
+                'Ratio': ratios,
+                'Scale': final_scales,
+                })
+            # Assert equality between the two DataFrames
+            cols = [f'V ({force})', 'Ratio', 'Scale']
+            np.testing.assert_allclose(df1[cols].values, df[cols].values, rtol=1e-3, atol=1e-3)
+
+# two systems
+@open_etabs_file('akhonzadeh.EDB')
+def test_scale_response_spectrums_two_systems():
+    for force in ('kgf',): #, 'N', 'KN'):
+        for length in ('m',): #, 'mm', 'cm'):
+            etabs.set_current_unit(force, length)
+            print(f'Units: {force=}, {length=}')
+            ex_name=['EXb', 'EX']
+            ey_name=['EYb', 'EY']
+            x_specs=['SX', 'SXE']
+            y_specs=['SY', 'SYE']
+            x_scales, y_scales, df = etabs.scale_response_spectrums(
+                ex_name=ex_name,
+                ey_name=ey_name,
+                x_specs=x_specs,
+                y_specs=y_specs,
+                analyze=False,
+            )
+            for scale in x_scales + y_scales:
+                assert pytest.approx(scale, abs=.001) == 1
+            # Test base reactions
+            V = etabs.results.get_base_react(
+                    loadcases=ex_name + ey_name,
+                    directions=['x'] * len(ex_name) + ['y'] * len(ey_name),
+                    absolute=True,
+                    )
+            vex = sum(V[0: len(ex_name)])
+            vey = sum(V[len(ex_name):])
+            vsx = etabs.results.get_base_react(
+                    loadcases=x_specs,
+                    directions=['x'] * len(x_specs),
+                    absolute=True,
+                    )
+            vsy = etabs.results.get_base_react(
+                    loadcases=y_specs,
+                    directions=['y'] * len(y_specs),
+                    absolute=True,
+            )
+            for v in vsx:
+                np.testing.assert_almost_equal(v / vex, 0.9, decimal=2)
+            for v in vsy:
+                np.testing.assert_almost_equal(v / vey, 0.9, decimal=2)
+            force = etabs.get_current_unit()[0]
+            load_cases = ['&'.join(ex_name),  '&'.join(ey_name)] + x_specs + y_specs
             base_shear = [vex, vey] + vsx + vsy
             ratios = [1, 1] + [vx / vex for vx in vsx] + [vy / vey for vy in vsy]
             final_scales = [1, 1] # Get final scales that applied in etabs model
@@ -604,8 +775,14 @@ def test_save_in_folder_and_add_name():
     assert new.parent.exists()
     assert new.exists()
 
+@open_etabs_file('shayesteh.EDB')
+def test_get_x_and_y_system_ductility():
+    d = {'x_system': [2, 1], 'y_system': [3, 1]}
+    ret = etabs.get_x_and_y_system_ductility(d=d)
+    assert ret == ['M', None]
+
 
 if __name__ == '__main__':
-    test_scale_response_spectrums2()
+    test_get_sap_main_version()
 
 

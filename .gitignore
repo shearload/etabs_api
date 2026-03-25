@@ -155,7 +155,12 @@ ENV/
 *.$et
 *.ico
 *.ebk
+*.tlog
+*.msh
 
+# SAP2000
+*.$2k
+*.sbk
 
 # tex
 *.aux
@@ -169,6 +174,12 @@ ENV/
 # FreeCAD
 *.FCStd1
 
+# uv
+uv.lock
+
 # securiry
 test/etabs_api/test.*
+test/files/backups/
 
+# civiltools
+test/files/*_table_results

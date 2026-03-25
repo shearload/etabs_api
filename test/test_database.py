@@ -2,6 +2,8 @@ import pytest
 from pathlib import Path
 import sys
 
+import numpy as np
+
 FREECADPATH = 'G:\\program files\\FreeCAD 0.19\\bin'
 sys.path.append(FREECADPATH)
 import FreeCAD
@@ -15,11 +17,32 @@ sys.path.insert(0, str(etabs_api_path))
 
 from shayesteh import etabs, open_etabs_file
 
+
+@open_etabs_file('shayesteh.EDB')
+def test_table_names_that_containe():
+    s = "Concrete Joint Design Summary"
+    names = etabs.database.table_names_that_containe(s)
+    assert len(names) == 0
+
 @open_etabs_file('shayesteh.EDB')
 def test_get_story_mass():
     story_mass = etabs.database.get_story_mass()
     assert len(story_mass) == 5
     assert pytest.approx(float(story_mass[2][1]), abs=1) == 17696
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_story_mass_as_dict():
+    story_mass = etabs.database.get_story_mass_as_dict()
+    assert len(story_mass) == 5
+    assert pytest.approx(story_mass.get('STORY3'), abs=1) == 17696
+    assert pytest.approx(story_mass.get('STORY2'), abs=1) == 18032
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_cumulative_story_mass():
+    story_mass = etabs.database.get_cumulative_story_mass()
+    assert len(story_mass) == 5
+    assert pytest.approx(story_mass.get('STORY3'), abs=1) == 17696
+    assert pytest.approx(story_mass.get('STORY2'), abs=1) == 18032
 
 @open_etabs_file('shayesteh.EDB')
 def test_get_center_of_rigidity():
@@ -41,6 +64,14 @@ def test_get_story_forces():
     forces, loadcases, _ = etabs.database.get_story_forces()
     assert len(forces) == 10
     assert loadcases == ('QX', 'QY')
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_story_forces_of_loadcases():
+    story_forces = etabs.database.get_story_forces_of_loadcases(loadcases=('QX', 'QY'))
+    assert len(story_forces) == 2
+    assert story_forces['QX']['STORY5'] == [0, 0]
+    assert story_forces['QX']['STORY4'] == [-40601.68, 0]
+    # assert np.testing.assert_allclose(story_forces['QX']['STORY4'], [-40601.68, 0])
 
 @open_etabs_file('shayesteh.EDB')
 def test_multiply_seismic_loads():
@@ -87,12 +118,29 @@ def test_write_daynamic_aj_user_coefficient():
 @open_etabs_file('two_earthquakes.EDB')
 def test_write_seismic_user_coefficient_df():
     import pandas as pd
-    filename = Path(__file__).absolute().parent / 'files' / 'dataframe' / 'auto_seismic'
-    df = pd.read_pickle(filename)
+    filename = Path(__file__).absolute().parent / 'files' / 'dataframe' / 'auto_seismic.csv'
+    df = pd.read_csv(filename)
+    df = df.astype(str)
     etabs.database.write_seismic_user_coefficient_df(df)
     table_key = 'Load Pattern Definitions - Auto Seismic - User Coefficient'
     df = etabs.database.read(table_key, to_dataframe=True)
     assert len(df) == 14
+
+@open_etabs_file('yadeganeh.EDB')
+def test_write_seismic_user_coefficient_df_yadeganeh():
+    table_key = 'Load Pattern Definitions - Auto Seismic - User Coefficient'
+    etabs.check_seismic_names(apply=True)
+    df = etabs.database.read(table_key, to_dataframe=True)
+    assert len(df) == 14
+
+@open_etabs_file('steel.EDB')
+def test_write_seismic_user_coefficient_df_with_ecc():
+    table_key = 'Load Pattern Definitions - Auto Seismic - User Coefficient'
+    df = etabs.database.read(table_key, to_dataframe=True)
+    etabs.database.write_seismic_user_coefficient_df(df)
+    x, xn, xp, y, yn, yp = etabs.load_patterns.get_seismic_load_patterns()
+    assert 'EXP' in xp
+    assert 'EXN' in xn
 
 @open_etabs_file('two_earthquakes.EDB')
 def test_write_seismic_user_coefficient_df01():
@@ -201,8 +249,17 @@ def test_create_section_cuts():
     df = etabs.database.get_section_cuts()
     assert len(df) == 90
 
-    
+@open_etabs_file('sap2000.sdb')
+def test_create_section_cuts_sap():
+    angles=range(0, 180, 10)
+    etabs.database.create_section_cuts_sap(group='All', angles=angles)
+    sects = etabs.database.get_section_cuts_sap()
+    assert len(sects) == len(angles)
 
+@open_etabs_file('sap2000.sdb')
+def test_get_section_cuts_sap():
+    sects = etabs.database.get_section_cuts_sap()
+    assert sects == []
 
 @open_etabs_file('khiabany.EDB')
 def test_expand_seismic_load_patterns():
@@ -385,4 +442,4 @@ def test_get_axial_pressure_columns():
 
 
 if __name__ == '__main__':
-    test_create_section_cuts()
+    test_write_seismic_user_coefficient_df_yadeganeh()

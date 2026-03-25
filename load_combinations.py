@@ -1,9 +1,21 @@
 
 from typing import Union
 import python_functions
+import enum
 
+import pandas as pd
+
+@enum.unique
+class COMBOTYPE(enum.IntEnum):
+    Linear_Add = 0
+    Envelope = 1
+    Absolute_Add = 2
+    Srss = 3
+    Range_Add = 4
 
 class LoadCombination:
+    combotyp = COMBOTYPE
+    
     def __init__(
                 self,
                 etabs=None,
@@ -22,8 +34,20 @@ class LoadCombination:
         self.SapModel.DatabaseTables.SetLoadCombinationsSelectedForDisplay(load_combinations)
     
     def get_load_combination_names(self):
-        return self.SapModel.RespCombo.GetNameList()[1]
-
+        try:
+            load_combinations = self.SapModel.RespCombo.GetNameList()[1]
+        except IndexError:
+            print("There is no load combinations in this model")
+            load_combinations = []
+        return load_combinations
+    
+    def delete_load_combinations(self, combo_names):
+        rets = set()
+        for combo_name in combo_names:
+            ret = self.etabs.SapModel.RespCombo.Delete(combo_name)
+            rets.add(ret)
+        return rets
+    
     def add_load_combination(
         self,
         combo_name: str,
@@ -80,19 +104,30 @@ class LoadCombination:
             if lc in seismic_load_cases:
                 return True
         return False
+    
+    def get_table_of_load_combinations(self,
+                                       cols: Union[list, None]=['Name', 'LoadName', 'Type', 'SF'],
+                                       ) -> pd.DataFrame:
+        table_key = "Load Combination Definitions"
+        if self.etabs.database.table_name_that_containe(table_key):
+            df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
+        else:
+            load_combinations = self.get_load_combinations_of_type()
+            ret = []
+            for combo in load_combinations:
+                type_ = self.get_type_of_combo(combo)
+                type_ = self.combotyp(type_).name.replace('_', ' ').title()
+                _, cases, scale_factores = self.SapModel.RespCombo.GetCaseList(combo)[1:4]
+                for case, sf in zip(cases, scale_factores):
+                    ret.append([combo, case, type_, sf])
+            df = pd.DataFrame(ret, columns=cols)
+        return df
+
 
     def get_type_of_combo(self,
         name : str,
         ):
-        map_dict = {
-        0 : 'Linear',
-        1 : 'Envelope',
-        2 : 'Absolute',
-        3 : 'SRSS',
-        4 : 'Range',
-        }
-        type_ = self.etabs.SapModel.RespCombo.GetTypeCombo(name)[0]
-        return map_dict[type_]
+        return self.etabs.SapModel.RespCombo.GetTypeOAPI(name)[0]
         
     def get_expand_linear_load_combinations(self,
         expanded_loads : dict,
@@ -103,7 +138,7 @@ class LoadCombination:
         EX, EXN, EXP, EY, EYN, EYP = self.etabs.load_patterns.get_seismic_load_patterns()
         for combo in combo_names:
             type_ = self.get_type_of_combo(combo)
-            if type_ == 'Linear':
+            if type_ == self.combotyp.Linear_Add:
                 number_items, cases, scale_factores = self.etabs.SapModel.RespCombo.GetCaseList(combo)[1:4]
                 max_sf = 0
                 # for models that has
@@ -212,7 +247,13 @@ class LoadCombination:
             dynamic=dynamic,
             )
         if notional_loads:
-            self.etabs.load_patterns.add_notional_loads(notional_loads)
+            etabs_notional_loads = self.etabs.load_patterns.get_notional_load_pattern_names()
+            current_notional_loads = set()
+            for nl in etabs_notional_loads:
+                current_notional_loads.add(nl[1:-1])
+            diff = set(notional_loads).difference(current_notional_loads)
+            if len(diff) > 0:
+                self.etabs.load_patterns.add_notional_loads(diff)
         return data
     
     def create_load_combinations_from_loads(self,
@@ -235,7 +276,6 @@ class LoadCombination:
             code = self.etabs.design.get_code(type_)
         code_string = self.etabs.design.get_code_string(type_, code)
         # set design combo
-        import pandas as pd
         if self.etabs.etabs_main_version < 20:
             cols = ['Combo Type', 'Combo Name']
             cols1 = ['Design Type']
@@ -679,8 +719,9 @@ def get_mabhas6_load_combinations(
                 if code == 'ACI':
                     if dynamic:
                         gravity = {
-                        '11'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
-                        '12'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'Snow':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '11'   : {'Dead':1.4 , 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '21'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '22'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'Snow':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '31'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'RoofLive':1.6, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '32'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'Snow':1.6, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '41'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
@@ -729,8 +770,9 @@ def get_mabhas6_load_combinations(
                         gravity.update(seismic)
                         return gravity
                     return {
-                        '11'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
-                        '12'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'Snow':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '11'   : {'Dead':1.4 , 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '21'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
+                        '22'   : {'Dead':1.2 , 'L':1.6, 'L_5':1.6, 'Snow':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '31'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'RoofLive':1.6, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '32'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'Snow':1.6, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
                         '41'   : {'Dead':1.2, 'L':1, 'L_5':0.5, 'RoofLive':0.5, 'HXP': 1.6, 'HXN': 1.6, 'HYP': 1.6, 'HYN': 1.6},
@@ -1254,6 +1296,8 @@ def get_mabhas6_load_combinations(
                     '1023' : {'Dead':0.6, 'EY' :-0.7, 'EY1' :-0.7, 'EX': 0.21, 'EX1': 0.21, 'EV':-0.7},
                     '1024' : {'Dead':0.6, 'EY' :-0.7, 'EY1' :-0.7, 'EX':-0.21, 'EX1':-0.21, 'EV':-0.7},
                 }
+            
+@python_functions.print_arguments
 def generate_concrete_load_combinations(
     equivalent_loads : dict,
     prefix : str = 'COMBO',
@@ -1292,7 +1336,7 @@ def generate_concrete_load_combinations(
     for number, combos in mabhas6_load_combinations.items():
         if add_notional_loads:
             is_gravity = True
-            for lateral_load in ('EX', 'EXP', 'EXN', 'EY', 'EYP', 'EYN', 'EX1', 'EXP1', 'EXN1', 'EY1', 'EYP1', 'EYN1',
+            for lateral_load in ('EX', 'EXP', 'EXN', 'EY', 'EYP', 'EYN', 'EX1', 'EXP1', 'EXN1', 'EY1', 'EYP1', 'EYN1', 'EV',
                                     'SXE', 'SYE', 'SX', 'SY', 'AngularDynamic'):
                 if lateral_load in combos.keys():
                     is_gravity = False

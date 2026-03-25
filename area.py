@@ -25,6 +25,45 @@ class Area:
         self.etabs = etabs
         self.SapModel = etabs.SapModel
 
+    def set_pier(self,
+                 names: list,
+                 pier_name: str="None",):
+        for name in names:
+            self.SapModel.AreaObj.SetPier(str(name), pier_name)
+
+    def delete(self,
+               names: Union[str, list],
+               ) -> None:
+        if isinstance(names, str):
+            names = [names]
+        for name in names:
+            self.SapModel.AreaObj.Delete(name)
+
+    def get_piers(self,
+                  names: Union[str, list, None]=None,
+                  ) -> dict:
+        if names is None:
+            names = self.get_names_of_areas_of_type('wall')
+        if isinstance(names, str):
+            names = [names]
+        return {name: self.SapModel.AreaObj.GetPier(name)[0] for name in names}
+    
+    def get_label_and_story_from_names(self,
+                                       names: Union[str, list, None]=None,
+                                       ) -> dict:
+        if names is None:
+            names = self.get_all_names()
+        if isinstance(names, str):
+            names = [names]
+        return {name: self.SapModel.AreaObj.GetLabelFromName(name)[:-1] for name in names}
+    
+    def get_all_names(self) ->  list:
+        try:
+            names = self.SapModel.AreaObj.GetNameList()[1]
+        except IndexError:
+            names = []
+        return names
+
     def get_names_of_areas_of_type(
             self,
             type_='floor',
@@ -683,11 +722,31 @@ class Area:
         beams, columns = self.etabs.frame_obj.get_beams_columns()
         self.etabs.frame_obj.assign_frame_modifiers(
             frame_names=beams + columns,
+            area=1,
+            as2=1,
+            as3=1,
+            # torsion=1,
             i22=1,
             i33=1,
         )
+        # Multiply j of beams and columns with 1.4
+        print("Multiply j of beams and columns with 1.4")
+        self.etabs.frame_obj.multiply_modifiers(
+            mult=[1, 1, 1, 1.4, 1, 1, 1, 1],
+            frame_names=beams + columns,
+        )
         print("Set Slab stiffness modifiers ...")
-        self.assign_slab_modifiers(m11=1, m22=1, m12=1, reset=True)
+        self.assign_slab_modifiers(
+            f11=1,
+            f22=1,
+            f12=1,
+            m11=1,
+            m22=1,
+            m12=1,
+            v13=1,
+            v23=1,
+            reset=True,
+            )
         print("Set floor cracking for beams and floors ...")
         self.etabs.database.set_floor_cracking(type_='Frame')
         self.etabs.database.set_floor_cracking(type_='Area')

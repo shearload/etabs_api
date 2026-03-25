@@ -3,6 +3,8 @@ from collections import Iterable
 from pathlib import Path
 import pytest
 
+import numpy as np
+
 etabs_api_path = Path(__file__).parent.parent
 sys.path.insert(0, str(etabs_api_path))
 
@@ -28,6 +30,19 @@ def test_create_concrete_column():
     names = etabs.prop_frame.get_concrete_rectangular_of_type(type_='Column')
     assert col_name not in names.unique()
 
+@open_etabs_file('PowelsRd-Rev26.EDB')
+def test_create_steel_tube():
+    name = 'Box'
+    material = "ST37(Plate)"
+    depth = 300
+    width = 200
+    t = 2.3
+    etabs.prop_frame.create_steel_tube(name, material, depth, width, t, t)
+    ret = etabs.SapModel.PropFrame.GetTube(name)
+    assert ret[1] == material
+    assert ret[2] == depth
+
+
 @open_etabs_file('shayesteh.EDB')
 def test_get_concrete_rectangular_of_type():
     ret = etabs.prop_frame.get_concrete_rectangular_of_type(type_='Column')
@@ -46,12 +61,174 @@ def test_convert_columns_design_types():
     ret = etabs.SapModel.PropFrame.GetRebarColumn("C4512F18")
     assert not ret[-2]
 
+@open_etabs_file('rashidzadeh.EDB')
+def test_change_beams_columns_section_fc():
+    names = {135, 396, 160, 159, 397, 153, 150, 129}
+    ret, _, section_that_corner_bars_is_different = etabs.prop_frame.change_beams_columns_section_fc(names, concrete='C35', suffix='_C35')
+    assert ret
+    assert len(section_that_corner_bars_is_different) == 3
+
+@open_etabs_file('two_earthquakes.EDB')
+def test_change_beams_columns_section_fc_different_longitudinal_and_corner_size():
+    # Prepare test data
+    names = {'86', '87'}
+    concrete = 'CONC'
+    suffix = '_CONC'
+    # Run the function
+    ret, convert_names, section_that_corner_bars_is_different = etabs.prop_frame.change_beams_columns_section_fc(
+        names, concrete=concrete, suffix=suffix, apply_with_tables_if_needed=True,
+    )
+    assert ret
+    # Check that the corner bar size difference is detected
+    assert any(section_that_corner_bars_is_different)
+    for frame_name in names:
+        section_name = etabs.frame_obj.get_section_name(frame_name)
+        args = etabs.SapModel.propframe.GetRebarColumn_1(
+                        section_name
+                        )
+        assert args[14] == '20d'
+    
+@open_etabs_file('rashidzadeh.EDB')
+def test_get_number_of_rebars_and_areas_of_column_section():
+    name = "C5516AC"
+    etabs.set_current_unit('kgf', 'mm')
+    n3, n2, area, corner_area = etabs.prop_frame.get_number_of_rebars_and_areas_of_column_section(name)
+    assert n3 == 5
+    assert n2 == 5
+    area25 = np.pi * 25 ** 2 / 4
+    area20 = np.pi * 20 ** 2 / 4
+    np.testing.assert_almost_equal(area25, corner_area, decimal=0)
+    np.testing.assert_almost_equal(area20, area, decimal=0)
+    name = "C5012AC"
+    n3, n2, area, corner_area = etabs.prop_frame.get_number_of_rebars_and_areas_of_column_section(name)
+    assert n3 == 4
+    assert n2 == 4
+    np.testing.assert_almost_equal(area25, corner_area, decimal=0)
+    np.testing.assert_almost_equal(area20, area, decimal=0)
+
+@open_etabs_file('rashidzadeh.EDB')
+def test_compare_two_columns():
+    below_col = '233'
+    above_col = '161'
+    below_sec = "C5012CD"
+    new_sections = (below_sec, "C6012C", "C5012C", "C5016C", "C5012AC")
+    errors = ('OK', "section_area", 'longitudinal_rebar_size', "longitudinal_rebar_size", 'corner_rebar_size')
+    for section, error in zip(new_sections, errors):
+        etabs.SapModel.FrameObj.SetSection(above_col, section)
+        er = etabs.prop_frame.compare_two_columns(below_col, above_col)
+        assert er.name == error
+
+@open_etabs_file('rashidzadeh.EDB')
+def test_check_if_rotation_of_two_columns_is_ok_and_need_to_convert_dimention():
+    below_col = '233'
+    above_col = '161'
+    below_sec = "C40X70"
+    above_sec = "C60X30"
+    etabs.SapModel.PropFrame.SetRectangle(below_sec, 'C30', 70, 40)
+    etabs.SapModel.PropFrame.SetRectangle(above_sec, 'C30', 30, 60)
+    etabs.SapModel.FrameObj.SetSection(below_col, below_sec)
+    etabs.SapModel.FrameObj.SetSection(above_col, above_sec)
+    for angle in range(-1000, 1000, 10):
+        etabs.SapModel.FrameObj.SetLocalAxes(above_col, angle)
+        etabs.SapModel.FrameObj.SetLocalAxes(below_col, angle + 90)
+        rotation_is_ok, need_to_convert_dimention = etabs.prop_frame.check_if_rotation_of_two_columns_is_ok_and_need_to_convert_dimention(below_col, above_col)
+        assert rotation_is_ok
+        assert need_to_convert_dimention
+        etabs.SapModel.FrameObj.SetLocalAxes(below_col, angle)
+        rotation_is_ok, need_to_convert_dimention = etabs.prop_frame.check_if_rotation_of_two_columns_is_ok_and_need_to_convert_dimention(below_col, above_col)
+        assert rotation_is_ok
+        assert not need_to_convert_dimention
+        etabs.SapModel.FrameObj.SetLocalAxes(below_col, angle + 10)
+        rotation_is_ok, need_to_convert_dimention = etabs.prop_frame.check_if_rotation_of_two_columns_is_ok_and_need_to_convert_dimention(below_col, above_col)
+        assert not rotation_is_ok
+        if (angle + 10) % 90 == 0:
+            assert need_to_convert_dimention
+        else:
+            assert not need_to_convert_dimention
+
+@open_etabs_file('rashidzadeh.EDB')
+def test_check_if_dimention_of_above_column_is_greater_than_below_column():
+    below_col = '233'
+    above_col = '161'
+    below_sec = "C40X70"
+    above_sec = "C60X30"
+    etabs.SapModel.PropFrame.SetRectangle(below_sec, 'C30', 70, 40)
+    etabs.SapModel.PropFrame.SetRectangle(above_sec, 'C30', 30, 60)
+    etabs.SapModel.FrameObj.SetSection(below_col, below_sec)
+    etabs.SapModel.FrameObj.SetSection(above_col, above_sec)
+    for angle in range(-1000, 1000, 10):
+        etabs.SapModel.FrameObj.SetLocalAxes(above_col, angle)
+        etabs.SapModel.FrameObj.SetLocalAxes(below_col, angle + 90)
+        ret = etabs.prop_frame.check_if_dimention_of_above_column_is_greater_than_below_column(below_col, above_col)
+        assert not ret[0]
+        etabs.SapModel.FrameObj.SetLocalAxes(below_col, angle)
+        ret = etabs.prop_frame.check_if_dimention_of_above_column_is_greater_than_below_column(below_col, above_col)
+        assert ret[0]
+
+@open_etabs_file("rashidzadeh.EDB")
+def test_get_material():
+    mat = etabs.prop_frame.get_material('404')
+    assert mat == "STEEL"
+    mat = etabs.prop_frame.get_material('411')
+    assert mat == "C30"
+
+@open_etabs_file('shayesteh.EDB')
+def test_create_concrete_column_sections():
+    etabs.set_current_unit('N', 'mm')
+    names = ['C40X40', 'C50X50']
+    concretes = ['CONC', 'CONC']
+    heights = [400, 500]
+    widths = [400, 500]
+    rebar_mats = ['RMAT', 'RMAT']
+    tie_mats = ['RMAT-1', 'RMAT-1']
+    covers = [40, 50]
+    number_3dir_main_bars = [4, 6]
+    number_2dir_main_bars = [4, 6]
+    longitudinal_bar_sizes = ['20d', '20d']
+    corner_bar_sizes = ['25d', '25d']
+    tie_rebar_sizes = ['10d', '10d']
+    tie_spaces = [100, 120]
+    number_2dir_tie_bars = [2, 2]
+    number_3dir_tie_bars = [2, 2]
+    designs = ['Yes', 'No']
+
+    etabs.prop_frame.create_concrete_column_sections(
+        names=names,
+        concretes=concretes,
+        heights=heights,
+        widths=widths,
+        rebar_mats=rebar_mats,
+        tie_mats=tie_mats,
+        covers=covers,
+        number_3dir_main_bars=number_3dir_main_bars,
+        number_2dir_main_bars=number_2dir_main_bars,
+        longitudinal_bar_sizes=longitudinal_bar_sizes,
+        corner_bar_sizes=corner_bar_sizes,
+        tie_rebar_sizes=tie_rebar_sizes,
+        tie_spaces=tie_spaces,
+        number_2dir_tie_bars=number_2dir_tie_bars,
+        number_3dir_tie_bars=number_3dir_tie_bars,
+        designs=designs,
+    )
+
+    df = etabs.database.read("Frame Section Property Definitions - Concrete Column Reinforcing", to_dataframe=True)
+    for i, name in enumerate(names):
+        mask = df['Name'].astype(str) == str(name)
+        assert mask.any()
+        row = df[mask].iloc[0]
+        assert row['RebarMatL'] == rebar_mats[i]
+        assert row['RebarMatC'] == tie_mats[i]
+        assert float(row['Cover']) == covers[i]
+        assert int(row['NumBars3Dir']) == number_3dir_main_bars[i]
+        assert int(row['NumBars2Dir']) == number_2dir_main_bars[i]
+        assert row['BarSizeLong'] == longitudinal_bar_sizes[i]
+        assert row['BarSizeCorn'] == corner_bar_sizes[i]
+        assert row['BarSizeConf'] == tie_rebar_sizes[i]
+        assert float(row['SpacingConf']) == tie_spaces[i]
+        assert int(row['NumCBars3']) == number_3dir_tie_bars[i]
+        assert int(row['NumCBars2']) == number_2dir_tie_bars[i]
+        assert row['IsDesigned'] == designs[i]
+
 
 if __name__ == '__main__':
-    from pathlib import Path
-    etabs_api = Path(__file__).parent.parent
-    import sys
-    sys.path.insert(0, str(etabs_api))
-    from etabs_obj import EtabsModel
-    etabs = EtabsModel(backup=False)
-    SapModel = etabs.SapModel
+    test_create_concrete_column_sections()

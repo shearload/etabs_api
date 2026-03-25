@@ -1,11 +1,17 @@
-#import comtypes.client
-comtypes.client.gen_dir = None
+import comtypes.client
+# import find_and_register_softwares as far
+# gen_dir = far.get_gen_dir()
+# if gen_dir.exists():
+#     comtypes.client.gen_dir = str(gen_dir)
+# comtypes.client.gen_dir = None
 from pathlib import Path
 from typing import Tuple, Union
 import shutil
 import math
 import sys
 import json
+
+from python_functions import change_unit
 
 
 from load_patterns import LoadPatterns
@@ -27,6 +33,8 @@ from design import Design
 from prop_frame import PropFrame
 from diaphragm import Diaphragm
 from func import Func
+from pier import Pier
+from shearwall import ShearWall
 
 __all__ = ['EtabsModel']
 
@@ -58,44 +66,38 @@ class EtabsModel:
                 self,
                 attach_to_instance: bool = True,
                 backup : bool = True,
-                software : str = 'ETABS', # 'SAFE'
+                software : str = 'ETABS', # 'SAFE', 'SAP2000'
                 model_path: Union[str, Path] = '',
                 software_exe_path: str = '',
+                pid_moniker: list=[],
                 ):
         self.software = software
         self.etabs = None
         self.success = False
+        self.error_message_connection = ''
+        helper = comtypes.client.CreateObject(f'{software}v1.Helper')
+        if software in ("ETABS", "SAFE"):
+            software_obj_name = 'ETABS'
+        elif software == "SAP2000":
+            software_obj_name = 'Sap'
+        exec(f"helper = helper.QueryInterface(comtypes.gen.{software}v1.cHelper)")
         if attach_to_instance:
-            try:
-                self.etabs = comtypes.client.GetActiveObject(f"CSI.{software}.API.ETABSObject")
+            if pid_moniker and hasattr(helper, 'GetObjectProcess'):
+                class_name, pid = pid_moniker
+                self.etabs = helper.GetObjectProcess(class_name, pid)
                 self.success = True
-            except (OSError, comtypes.COMError):
-                print("No running instance of the program found or failed to attach.")
-                self.success = False
-            else:
-                helper = comtypes.client.CreateObject('ETABSv1.Helper')
-                helper = helper.QueryInterface(comtypes.gen.ETABSv1.cHelper)
-                if hasattr(helper, 'GetObjectProcess'):
-                    try:
-                        import psutil
-                    except ImportError:
-                        import subprocess
-                        package = 'psutil'
-                        subprocess.check_call(['python', "-m", "pip", "install", package])
-                        import psutil
-                    pid = None
-                    for proc in psutil.process_iter():
-                        if software.lower() in proc.name().lower():
-                            pid = proc.pid
-                            break
-                    if pid is not None:
-                        self.etabs = helper.GetObjectProcess(f"CSI.{software}.API.ETABSObject", pid)
-                        self.success = True
-                # sys.exit(-1)
+            elif not self.success:
+                try:
+                    self.etabs = helper.GetObject(f"CSI.{software}.API.{software_obj_name}Object")
+                    self.success = True
+                except (OSError, comtypes.COMError):
+                    print("No running instance of the program found or failed to attach.")
+                    self.success = False
+            
         else:
             # sys.exit(-1)
-            helper = comtypes.client.CreateObject('ETABSv1.Helper')
-            helper = helper.QueryInterface(comtypes.gen.ETABSv1.cHelper)
+            # helper = comtypes.client.CreateObject(f'{software}v1.Helper')
+            # helper = helper.QueryInterface(comtypes.gen.ETABSv1.cHelper)
             if software_exe_path:
                 try:
                     self.etabs = helper.CreateObject(software_exe_path)
@@ -104,7 +106,7 @@ class EtabsModel:
                     sys.exit(-1)
             else:
                 try:
-                    self.etabs = helper.CreateObjectProgID("CSI.ETABS.API.ETABSObject")
+                    self.etabs = helper.CreateObjectProgID(f"CSI.{software}.API.{software_obj_name}Object")
                 except (OSError, comtypes.COMError):
                     print("Cannot start a new instance of the program.")
                     sys.exit(-1)
@@ -113,7 +115,7 @@ class EtabsModel:
             if model_path:
                 self.etabs.SapModel.File.OpenFile(str(model_path))
 
-        if self.success:
+        if self.success and self.etabs is not None:
             self.SapModel = self.etabs.SapModel
             if backup:
                 self.backup_model()
@@ -127,7 +129,7 @@ class EtabsModel:
             self.story = Story(None, self)
             self.frame_obj = FrameObj(self)
             self.analyze = Analyze(self.SapModel, None)
-            self.view = View(self.SapModel, None)
+            self.view = View(self)
             self.database = DatabaseTables(None, self)
             # self.sections = Sections(self.SapModel, None)
             self.results = Results(None, self)
@@ -140,7 +142,66 @@ class EtabsModel:
             self.prop_frame = PropFrame(self)
             self.diaphragm = Diaphragm(self)
             self.func = Func(self)
-            self.etabs_main_version = self.get_etabs_main_version()
+            self.pier = Pier(self)
+            self.shearwall = ShearWall(self)
+            self.set_special_values_according_to_software_and_version()
+            self.etabs_pywinauto = None
+    
+    @staticmethod
+    def connect_to_the_software_using_the_executable_path(exe_path):
+        exe_name = Path(exe_path).name
+        software = exe_name.split('.')[0]
+        helper = comtypes.client.CreateObject(f'{software}v1.Helper')
+        exec(f"helper = helper.QueryInterface(comtypes.gen.{software}v1.cHelper)")
+        software_instance = helper.CreateObject(exe_path)
+        return software_instance
+
+    def get_pywinauto_etabs(self):
+        if self.etabs_pywinauto is not None:
+            try:
+                self.etabs_pywinauto.is_enabled()
+                print(f"The {self.software} is still Open.")
+                return self.etabs_pywinauto
+            except comtypes.COMError:
+                print(f"The {self.software} has been closed by the user.")
+                self.etabs_pywinauto = None
+        try:
+            from pywinauto import Desktop
+        except ImportError:
+            import freecad_funcs
+            freecad_funcs.install_package('pywinauto')
+            from pywinauto import Desktop
+        # windows = Desktop(backend="uia").windows(title_re=".*ETABS.*")
+        # if not windows:
+        #     return None
+        print("Available ETABS windows:")
+        info = self.SapModel.GetProgramInfo()
+        title = f"{info[0]}.*{info[2]}.*{info[1]}"
+        try:
+            # from pywinauto import Desktop
+            windows = Desktop(backend="uia").windows(title_re=f".*{title}.*")
+            if len(windows) > 0:
+                print(f"{' '.join(info[:-1])}")
+                self.etabs_pywinauto = windows[0]
+                return windows[0]
+            # ver = self.version()
+            # for i, window in enumerate(windows):
+            #     title = window.window_text()
+            #     print(f"{i}: {title}")
+            #     if ver in title:
+            #         self.etabs_pywinauto = window
+            #         return self.etabs_pywinauto
+        except (comtypes.COMError, AttributeError):
+            print(f"No ETABS version found with title: {' '.join(info[:-1])}.")
+            if windows:
+                self.etabs_pywinauto = windows[0]
+            else:
+                self.etabs_pywinauto = None
+        return self.etabs_pywinauto
+
+    def set_special_values_according_to_software_and_version(self):
+        self.etabs_main_version = self.get_etabs_main_version()
+        if self.software == "ETABS":
             if self.etabs_main_version < 20:
                 self.seismic_drift_text = 'Seismic (Drift)'
                 self.seismic_drift_load_type = 37
@@ -187,7 +248,21 @@ class EtabsModel:
                     'OverEcc',
                 ]
                 self.auto_notional_loads_columns = ['LoadPattern', 'BasePattern', 'LoadRatio', 'LoadDir']
-                
+            self.auto_seismic_user_coefficient_columns = {
+                'IsAuto': 'Is Auto Load',
+                'XDir': 'X Dir?',
+                'XDirPlusE': 'X Dir Plus Ecc?',
+                'XDirMinusE': 'X Dir Minus Ecc?',
+                'YDir': 'Y Dir?',
+                'YDirPlusE': 'Y Dir Plus Ecc?',
+                'YDirMinusE': 'Y Dir Minus Ecc?',
+                'EccRatio': 'Ecc Ratio',
+                'TopStory': 'Top Story',
+                'BotStory': 'Bottom Story',
+                'OverStory': 'Ecc Overwrite Story',
+                'OverDiaph': 'Ecc Overwrite Diaphragm',
+                'OverEcc': 'Ecc Overwrite Length',
+            }
 
     def get_etabs_main_version(self):
         ver = self.SapModel.GetVersion()
@@ -202,6 +277,8 @@ class EtabsModel:
     def backup_model(self, name=None):
         max_num = 0
         backup_path=None
+        asli_file_path = self.get_filename()
+        suffix = asli_file_path.suffix
         if name is None:
             filename = self.get_file_name_without_suffix()
             file_path = self.get_filepath()
@@ -209,18 +286,17 @@ class EtabsModel:
             if not backup_path.exists():
                 import os
                 os.mkdir(str(backup_path))
-            for edb in backup_path.glob(f'BACKUP_{filename}*.EDB'):
-                num = edb.name.rstrip('.EDB')[len('BACKUP_') + len(filename) + 1:]
+            for edb in backup_path.glob(f'BACKUP_{filename}*{suffix}'):
+                num = edb.name.rstrip(suffix)[len('BACKUP_') + len(filename) + 1:]
                 try:
                     num = int(num)
                     max_num = max(max_num, num)
                 except ValueError:
                     continue
-            name = f'BACKUP_{filename}_{max_num + 1}.EDB'
-        if not name.lower().endswith('.edb'):
-            name += '.EDB'
-        asli_file_path = self.get_filename()
-        asli_file_path = asli_file_path.with_suffix('.EDB')
+            name = f'BACKUP_{filename}_{max_num + 1}{suffix}'
+        if not name.lower().endswith(suffix.lower()):
+            name += suffix
+        asli_file_path = asli_file_path.with_suffix(suffix)
         if backup_path is None:
             new_file_path = asli_file_path.parent / name
         else:
@@ -230,7 +306,9 @@ class EtabsModel:
 
     def remove_backups(self):
         file_path = self.get_filepath() / 'backups'
-        for edb in file_path.glob('BACKUP_*.EDB'):
+        asli_file_path = self.get_filename()
+        suffix = asli_file_path.suffix
+        for edb in file_path.glob(f'BACKUP_*{suffix}'):
             edb.unlink()
         return None
 
@@ -243,6 +321,8 @@ class EtabsModel:
         self.SapModel.SetModelIsLocked(True)
     
     def unlock_model(self):
+        name = self.get_filename()
+        print(f"Unlock Model: {name}")
         self.SapModel.SetModelIsLocked(False)
 
     def lock_and_unlock_model(self):
@@ -265,6 +345,7 @@ class EtabsModel:
         ):
         if check_designed and self.design.model_designed(type_=type_):
             return
+        self.run_analysis()
         print(f"Starting Design {type_}")
         exec(f"self.SapModel.Design{type_}.StartDesign()")
 
@@ -283,21 +364,23 @@ class EtabsModel:
             raise KeyError
         self.SapModel.SetPresentUnits(number)
     
-    def get_current_unit(self):
-        force_enum, len_enum, *argv = self.SapModel.GetPresentUnits_2()
-        for key, value in EtabsModel.force_units.items():
-            if force_enum == value:
-                force = key
+    def get_current_unit(self,
+                         ):
+        found = False
+        unit_num = self.SapModel.GetPresentUnits()
+        for unit_str, n in self.enum_units.items():
+            if n == unit_num:
+                force, length = unit_str.split("_")[0:2]
+                found = True
                 break
-        for key, value in EtabsModel.length_units.items():
-            if len_enum == value:
-                length = key
-                break
+        if not found:
+            force, length = 'N', 'mm'
+            self.SapModel.SetPresentUnits(9)
         return force, length
 
     def get_file_name_without_suffix(self):
         f = Path(self.SapModel.GetModelFilename())
-        name = f.name.replace(f.suffix, '')
+        name = f.stem
         return name
     
     def get_filename_with_suffix(self,
@@ -332,6 +415,8 @@ class EtabsModel:
         '''
         return: WindowsPath('H:/1402/montazer/rashidzadeh/etabs/test.EDB')
         '''
+        if not hasattr(self, 'SapModel') or self.SapModel is None:
+            return None
         filename = self.SapModel.GetModelFilename()
         if filename is None:
             return None
@@ -380,12 +465,13 @@ class EtabsModel:
                                   ):
         '''
         Save the current file with FILENAME_name in folder_name
-        forlder of etabs file
+        folder of etabs file
         '''
         asli_file_path, new_filename = self.get_new_filename_in_folder_and_add_name(
             folder_name=folder_name,
             name=name,
             )
+        print(f" Save Model As {new_filename}")
         self.SapModel.File.Save(str(new_filename))
         return asli_file_path, new_filename
     
@@ -428,6 +514,8 @@ class EtabsModel:
         json_file = Path(self.SapModel.GetModelFilepath()) / json_name
         self.save_to_json(json_file, data)
 
+    def open_model(self, filename: Union[str, Path]):
+        self.SapModel.File.OpenFile(str(filename))
 
     def get_main_periods(self,
                          modal_case: str='',
@@ -676,8 +764,10 @@ class EtabsModel:
         '''
         df = self.check_seismic_names(d=d)
         print("Applying cfactor to edb\n")
+        cols = ['TopStory', 'BotStory', 'C', 'K']
         for earthquakes, new_factors in data:
-            df.loc[df.Name.isin(earthquakes), ['TopStory', 'BotStory', 'C', 'K']] = new_factors
+            df.loc[df.Name.isin(earthquakes), cols] = new_factors
+        print(df)
         num_fatal_errors, ret = self.database.write_seismic_user_coefficient_df(df)
         print(f"num_fatal_errors, ret = {num_fatal_errors}, {ret}")
         return num_fatal_errors
@@ -762,7 +852,7 @@ class EtabsModel:
     
     def get_irregularity_of_mass(self, story_mass=None):
         if not story_mass:
-            story_mass = self.database.get_story_mass()
+            story_mass = self.database.get_story_mass(unit=('tonf', 'm'))
         for i, sm in enumerate(story_mass):
             m_neg1 = float(story_mass[i - 1][1]) * 1.5
             m = float(sm[1])
@@ -773,7 +863,7 @@ class EtabsModel:
             if i == 0:
                 m_neg1 = m
             sm.extend([m_neg1, m_plus1])
-        fields = ('Story', 'Mass X', '1.5 * Below', '1.5 * Above')
+        fields = ('Story', 'Mass (tonf)', '1.5 * Below', '1.5 * Above')
         return story_mass, fields
 
     def add_load_case_in_center_of_rigidity(self, story_name, x, y):
@@ -783,31 +873,37 @@ class EtabsModel:
         diaph = self.story.get_story_diaphragms(story_name).pop()
         self.SapModel.PointObj.SetDiaphragm(point_name, 3, diaph)
         LTYPE_OTHER = 8
-        lp_name = f'STIFFNESS_{story_name}'
-        self.SapModel.LoadPatterns.Add(lp_name, LTYPE_OTHER, 0, True)
-        load = 1000
-        PointLoadValue = [load,load,0,0,0,0]
-        self.SapModel.PointObj.SetLoadForce(point_name, lp_name, PointLoadValue)
-        self.analyze.set_load_cases_to_analyze(lp_name)
-        return point_name, lp_name
+        lp_name_x = f'X_STIFFNESS_{story_name}'
+        lp_name_y = f'Y_STIFFNESS_{story_name}'
+        for lp_name in (lp_name_x, lp_name_y):
+            self.SapModel.LoadPatterns.Add(lp_name, LTYPE_OTHER, 0, True)
+        load = 100000
+        point_load_value_x = [load, 0, 0, 0, 0, 0]
+        point_load_value_y = [0, load, 0, 0, 0, 0]
+        self.SapModel.PointObj.SetLoadForce(point_name, lp_name_x, point_load_value_x)
+        self.SapModel.PointObj.SetLoadForce(point_name, lp_name_y, point_load_value_y)
+        self.analyze.set_load_cases_to_analyze([lp_name_x, lp_name_y])
+        return point_name, lp_name_x, lp_name_y
 
     def get_story_stiffness_modal_way(self):
         story_mass = self.database.get_story_mass()[::-1]
         story_mass = {key: value for key, value in story_mass}
-        stories = list(story_mass.keys())
+        storyname_and_levels = self.story.storyname_and_levels()
+        stories = sorted(storyname_and_levels, key=storyname_and_levels.get, reverse=True)[:-1]
         dx, dy, wx, wy = self.database.get_stories_displacement_in_xy_modes()
         story_stiffness = {}
-        n = len(story_mass)
-        for i, (phi_x, phi_y) in enumerate(zip(dx.values(), dy.values())):
-            if i == n - 1:
-                phi_neg_x = 0
-                phi_neg_y = 0
+        for i, story in enumerate(stories):
+            if story not in story_mass.keys():
+                continue
+            if story == stories[-1]:
+                phi_below_x = 0
+                phi_below_y = 0
             else:
-                story_neg = stories[i + 1]
-                phi_neg_x = dx[story_neg]
-                phi_neg_y = dy[story_neg]
-            d_phi_x = phi_x - phi_neg_x
-            d_phi_y = phi_y - phi_neg_y
+                below_story = stories[i + 1]
+                phi_below_x = dx.get(below_story)
+                phi_below_y = dy.get(below_story)
+            d_phi_x = dx.get(story) - phi_below_x
+            d_phi_y = dy.get(story) - phi_below_y
             sigma_x = 0
             sigma_y = 0
             for j in range(0, i + 1):
@@ -831,20 +927,26 @@ class EtabsModel:
         story_names = center_of_rigidity.keys()
         story_stiffness = {}
         name = self.get_file_name_without_suffix()
+        folder_name = "story_stiffness"
+        folder_path = dir_path / folder_name
+        if not folder_path.exists():
+            import os
+            os.mkdir(str(folder_path))
         for story_name in story_names:
-            story_file_path = dir_path / f'{name}_STIFFNESS_{story_name}.EDB'
+            story_file_path = folder_path / f'{name}_STIFFNESS_{story_name}.EDB'
             print(f"Saving file as {story_file_path}\n")
             shutil.copy(asli_file_path, story_file_path)
             print(f"Opening file {story_file_path}\n")
             self.SapModel.File.OpenFile(str(story_file_path))
             x, y = center_of_rigidity[story_name]
-            point_name, lp_name = self.add_load_case_in_center_of_rigidity(
+            point_name, lp_name_x, lp_name_y = self.add_load_case_in_center_of_rigidity(
                     story_name, x, y)
             self.story.fix_below_stories(story_name)
             self.SapModel.View.RefreshView()
             self.SapModel.Analyze.RunAnalysis()
-            disp_x, disp_y = self.results.get_point_xy_displacement(point_name, lp_name)
-            kx, ky = 1000 / abs(disp_x), 1000 / abs(disp_y)
+            disp_x = self.results.get_point_xy_displacement(point_name, lp_name_x)[0]
+            disp_y = self.results.get_point_xy_displacement(point_name, lp_name_y)[1]
+            kx, ky = 100000 / abs(disp_x), 100000 / abs(disp_y)
             story_stiffness[story_name] = [kx, ky]
         self.SapModel.File.OpenFile(str(asli_file_path))
         return story_stiffness
@@ -892,10 +994,13 @@ class EtabsModel:
                 story_stiffness = self.get_story_stiffness_modal_way()
             elif way == 'earthquake':
                 story_stiffness = self.get_story_stiffness_earthquake_way()
-        stories = list(story_stiffness.keys())
+        storyname_and_levels = self.story.storyname_and_levels()
+        stories = sorted(storyname_and_levels, key=storyname_and_levels.get, reverse=True)
         retval = []
         for i, story in enumerate(stories):
-            stiffness = story_stiffness[story]
+            stiffness = story_stiffness.get(story, None)
+            if stiffness is None:
+                continue
             kx = stiffness[0]
             ky = stiffness[1]
             if i == 0:
@@ -940,8 +1045,8 @@ class EtabsModel:
         return new_data, fields
 
     def scale_response_spectrums(self,
-        ex_name : str,
-        ey_name : str,
+        ex_name : Union[str, list],
+        ey_name : Union[str, list],
         x_specs : list,
         y_specs : list,
         x_scale_factor : float = 0.9, # 0.85, 0.9, 1
@@ -955,17 +1060,27 @@ class EtabsModel:
         ):
         assert x_scale_factor in (0.85, 0.9, 1)
         assert y_scale_factor in (0.85, 0.9, 1)
-        print(f'{ex_name=}, {ey_name=}, {x_specs=}, {y_specs=}, {x_scale_factor=}, {y_scale_factor=}, {tolerance=}')
+        if isinstance(ex_name, str):
+            ex_name = [ex_name]
+        if isinstance(ey_name, str):
+            ey_name = [ey_name]
+        ex_names = ex_name
+        ey_names = ey_name
+        print(f'{ex_names=}, {ey_names=}, {x_specs=}, {y_specs=}, {x_scale_factor=}, {y_scale_factor=}, {tolerance=}')
         self.SapModel.File.Save()
         if reset_scale:
             self.load_cases.reset_scales_for_response_spectrums(loadcases=x_specs+y_specs)
         self.set_current_unit('kgf', 'm')
-        self.analyze.set_load_cases_to_analyze([ex_name, ey_name] + x_specs + y_specs)
-        vex, vey = self.results.get_base_react(
-                loadcases=[ex_name, ey_name],
-                directions=['x', 'y'],
+        self.analyze.set_load_cases_to_analyze(ex_names + ey_names + x_specs + y_specs)
+        V = self.results.get_base_react(
+                loadcases=ex_names + ey_names,
+                directions=len(ex_names) * ['x'] + len(ey_names) * ['y'],
                 absolute=True,
                 )
+        vexes = V[0:len(ex_names)]
+        veyes = V[len(ex_names):]
+        vex = sum(vexes)
+        vey = sum(veyes)
         if consider_min_static_base_shear:
             def acceleration(risk_level):
                 accs = {'کم': 0.20,
@@ -977,14 +1092,16 @@ class EtabsModel:
                 d = self.get_settings_from_model()
             acc = acceleration(d.get("risk_level"))
             importance_factor = float(d.get("importance_factor"))
-            cx, cy = self.load_patterns.get_earthquake_values([ex_name, ey_name])
-            wx = vex / cx
-            wy = vey / cy
+            earthquake_factors = self.load_patterns.get_earthquake_values(ex_names + ey_names)
+            cxes = earthquake_factors[0: len(ex_names)]
+            cyes = earthquake_factors[len(ex_names):]
+            wx = sum([vex / cx for vex, cx in zip(vexes, cxes)])
+            wy = sum([vey / cy for vey, cy in zip(veyes, cyes)])
             c_min = 0.12 * acc * importance_factor
             vx_min = c_min * wx
             vy_min = c_min * wy
-            print(f"{cx=}, {cy=}, {wx=}, {wy=}, {c_min=}, {vx_min=}, {vy_min=}")
-        print(f'{vex=}, {vey=}')
+            print(f"{cxes=}, {cyes=}, {wx=}, {wy=}, {c_min=}, {vx_min=}, {vy_min=}")
+        print(f'{vexes=}, {veyes=}')
         for i in range(num_iteration):
             vsx = self.results.get_base_react(
                     loadcases=x_specs,
@@ -1021,7 +1138,7 @@ class EtabsModel:
                     self.load_cases.multiply_response_spectrum_scale_factor(spec, scale)
         force = self.get_current_unit()[0]
         import pandas as pd
-        load_cases = [ex_name, ey_name] + x_specs + y_specs
+        load_cases = ['&'.join(ex_names),  '&'.join(ey_names)] + x_specs + y_specs
         base_shear = [vex, vey] + vsx + vsy
         ratios = [1, 1] + [vx / vex for vx in vsx] + [vy / vey for vy in vsy]
         final_scales = [1, 1] # Get final scales that applied in etabs model
@@ -1041,8 +1158,8 @@ class EtabsModel:
         return x_scales, y_scales, df
 
     def angles_response_spectrums_analysis(self,
-        ex_name : str,
-        ey_name : str,
+        ex_name : list,
+        ey_name : list,
         specs : list = None,
         section_cuts : list = None,
         scale_factor : float = 0.9, # 0.85, 0.9, 1
@@ -1051,11 +1168,17 @@ class EtabsModel:
         reset_scale : bool = True,
         analyze : bool = True,
         ):
-        print(f"{ex_name=}, {ey_name=}, {specs=}, {section_cuts=}")
+        if isinstance(ex_name, str):
+            ex_name = [ex_name]
+        if isinstance(ey_name, str):
+            ey_name = [ey_name]
+        ex_names = ex_name
+        ey_names = ey_name
+        print(f"{ex_names=}, {ey_names=}, {specs=}, {section_cuts=}")
         self.SapModel.File.Save()
         if reset_scale:
             self.load_cases.reset_scales_for_response_spectrums(loadcases=specs)
-        loadcases = [ex_name, ey_name] + specs
+        loadcases = ex_names + ey_names + specs
         base_shear_spec = {}
         base_shear_ex = {}
         base_shear_ey = {}
@@ -1080,8 +1203,8 @@ class EtabsModel:
                 angle_specs[angle] = spec
                 df_angle_section = df[(df['SectionCut'] == section_cut) & (df['angle'] == angle)][['F1', 'OutputCase']]
                 df_angle_section.set_index('OutputCase', inplace=True)
-                f_ex = abs(df_angle_section.loc[ex_name, 'F1'])
-                f_ey = abs(df_angle_section.loc[ey_name, 'F1'])
+                f_ex = abs(sum(df_angle_section.loc[ex_names, 'F1']))
+                f_ey = abs(sum(df_angle_section.loc[ey_names, 'F1']))
                 f_spec = abs(df_angle_section.loc[spec, 'F1'])
                 scale = scale_factor * math.sqrt(f_ex ** 2 + f_ey ** 2) / f_spec
                 spec_scales[spec] = scale
@@ -1111,8 +1234,10 @@ class EtabsModel:
             load_cases.append(angle_specs[angle])
             ret = self.SapModel.LoadCases.ResponseSpectrum.GetLoads(angle_specs[angle])
             final_scales.append(ret[3][0])
-        ex_name_col_title = f'{ex_name} ({force})'
-        ey_name_col_title = f'{ey_name} ({force})'
+        ex_names_str = '&'.join(ex_names)
+        ey_names_str = '&'.join(ey_names)
+        ex_name_col_title = ex_names_str + f' {force}'
+        ey_name_col_title = ey_names_str + f' {force}'
         spec_col_title = f'SPEC ({force})'
         df = pd.DataFrame({
             "Name": load_cases,
@@ -1123,7 +1248,7 @@ class EtabsModel:
             # 'Ratio': ratios,
             # 'Scale': final_scales,
             })
-        static_col_title = f"({ex_name}^2 + {ey_name}^2) ^0.5"
+        static_col_title = f"({ex_names_str}^2 + {ey_names_str}^2) ^0.5"
         df[static_col_title] = df.apply(
             lambda row: math.sqrt(row[ex_name_col_title] ** 2 + row[ey_name_col_title] ** 2),
             axis=1,
@@ -1142,24 +1267,32 @@ class EtabsModel:
         file_name: Union[str, Path]= 'js',
         structure_type: str = 'Sway Intermediate',
         open_main_file: bool =  False,
+        create_file: bool = True,
         ):
-        # get main file path
-        main_file_path = Path(self.SapModel.GetModelFilename())
-        main_file_path = main_file_path.with_suffix(".EDB")
-        if structure_type == 'Sway Intermediate':
-            self.save_in_folder_and_add_name(folder_name="joint_shear", name=str(file_name))
-            phi = 0.75
-            self.design.set_concrete_framing_type(1, beams=False)
-        else:
-            phi = 0.85
-        self.design.set_phi_joint_shear(phi)
-        self.run_analysis()
+        version = self.etabs_main_version
+        if version < 22 and create_file:
+            # get main file path
+            main_file_path = Path(self.SapModel.GetModelFilename())
+            main_file_path = main_file_path.with_suffix(".EDB")
+            if structure_type == 'Sway Intermediate':
+                self.save_in_folder_and_add_name(folder_name="joint_shear", name=str(file_name))
+                phi = 0.75
+                self.design.set_concrete_framing_type(1, beams=False)
+            else:
+                phi = 0.85
+            self.design.set_phi_joint_shear(phi)
         self.start_design()
-        code = self.design.get_code()
-        table_key = f"Concrete Joint Design Summary - {code}"
+        table_key = self.database.table_name_that_containe("Concrete Joint Design Summary")
+        if table_key is None:
+            return None
         cols = ['Story', 'Label', 'UniqueName', 'JSMajRatio', 'JSMinRatio', 'BCMajRatio', 'BCMinRatio']
         df = self.database.read(table_key=table_key, to_dataframe=True, cols=cols)
-        if structure_type == 'Sway Intermediate' and open_main_file:
+        if all((
+            create_file,
+            structure_type == 'Sway Intermediate',
+            open_main_file,
+            version < 22,
+        )):
             self.SapModel.File.OpenFile(str(main_file_path))
         return df
     
@@ -1382,6 +1515,8 @@ class EtabsModel:
             self.load_patterns.add_load_patterns(not_es_drifts, self.seismic_drift_text)
         df2 = pd.DataFrame(new_rows)
         df = pd.concat([df, df2])
+        print(f"{df=}")
+        print(f"{df.columns=}")
         if apply:
             self.database.write_seismic_user_coefficient_df(df)
         return df
@@ -1400,10 +1535,120 @@ class EtabsModel:
         if not json_filename.endswith('.json'):
             json_filename += ".json"
         return table_result_path / json_filename
+    
+    def scale_response_spectrum_with_respect_to_settings(self,
+                                                         d: Union[dict, None]=None,
+                                                         analyze: bool=False,
+                                                         consider_min_static_base_shear: bool=False,
+                                                         reset_scale: bool=True,
+                                                         ):
+        if d is None:
+            d = self.get_settings_from_model()
+        ex_name = d.get("ex_combobox")
+        ey_name = d.get("ey_combobox")
+        x_scale_factor = float(d.get("x_scalefactor_combobox", 1.0))
+        y_scale_factor = float(d.get("y_scalefactor_combobox", 1.0))
+        if d.get("combination_response_spectrum_checkbox", False):
+            print("Start 100-30 Scale Response Spectrum\n")
+            sx, sxe, sy, sye = self.get_dynamic_loadcases(d)
+            x_specs = [sx, sxe]
+            y_specs = [sy, sye]
+            self.scale_response_spectrums(
+                ex_name,
+                ey_name,
+                x_specs,
+                y_specs,
+                x_scale_factor,
+                y_scale_factor,
+                analyze=analyze,
+                consider_min_static_base_shear=consider_min_static_base_shear,
+                reset_scale=reset_scale,
+                d=d,
+            )
+        elif d.get("angular_response_spectrum_checkbox", False):
+            print("Start angular Scale Response Spectrum\n")
+            specs = []
+            section_cuts = []
+            key = "angular_tableview"
+            dic = d.get(key, None)
+            if dic is not None:
+                for sec_cut, spec in dic.values():
+                    section_cuts.append(sec_cut)
+                    specs.append(spec)
+                self.angles_response_spectrums_analysis(
+                    ex_name,
+                    ey_name,
+                    specs,
+                    section_cuts,
+                    x_scale_factor,
+                    analyze=analyze,
+                    reset_scale=reset_scale,
+                )
 
-        
-        
+    def get_x_and_y_system_ductility(self,
+                                     d: Union[dict, None],
+                                     ) -> list:
+        '''
+        H: High, M: Medium, L: Low
+        '''
+        if d is None:
+            d = self.get_settings_from_model()
+        x_system = d.get('x_system', [2, 1])
+        y_system = d.get('y_system', [2, 1])
+        ductilities = []
+        for system in (x_system, y_system):
+            if system in (
+                [0, 0],
+                [1, 0], [1, 4], [1, 7],
+                [2, 0], [2, 3],
+                [3, 0], [3, 4], [3, 5], [3, 6], [3, 7],
+                [4, 0],
+                ):
+                ductilities.append('H')
+            elif system in (
+                [0, 1],
+                [1, 1],
+                [2, 1], [2, 4],
+                [3, 2], [3, 3],
+            ):
+                ductilities.append('M')
+            elif system in (
+                [0, 2],
+                [1, 2], [1, 6],
+                [2, 2], [2, 5],
+            ):
+                ductilities.append('L')
+            else:
+                ductilities.append(None)
+        return ductilities
 
+
+
+
+def list_rot_entries():
+    # Requires pywin32: pip install pywin32
+    try:
+        import pythoncom
+    except ImportError:
+        packages = ['pypiwin32', 'pywin32']
+        from freecad_funcs import install_packages
+        install_packages(package_names=packages)
+    import pythoncom
+    rot = pythoncom.GetRunningObjectTable()
+    enum = rot.EnumRunning()
+    monikers = []
+    while True:
+        next_item = enum.Next(1)
+        if not next_item:
+            break
+        moniker = next_item[0]
+        bindctx = pythoncom.CreateBindCtx(0)
+        try:
+            name = moniker.GetDisplayName(bindctx, None)
+        except Exception:
+            name = "<could not get display name>"
+        monikers.append(name)
+    return monikers
 
 
 class Build:

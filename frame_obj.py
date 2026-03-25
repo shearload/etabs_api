@@ -1,9 +1,16 @@
 from pathlib import Path
 from typing import Iterable, Union
 import math
+import copy
 
-from python_functions import change_unit
-import freecad_funcs
+import pandas as pd
+
+from python_functions import change_unit, get_column_labels
+
+try:
+    import freecad_funcs
+except NameError:
+    pass
 
 
 class FrameObj:
@@ -12,7 +19,8 @@ class FrameObj:
                 etabs=None,
                 ):
         self.etabs = etabs
-        self.SapModel = self.etabs.SapModel
+        if etabs is not None:
+            self.SapModel = self.etabs.SapModel
 
     def set_end_release_frame(self, name):
         end_release = self.SapModel.FrameObj.GetReleases(name)
@@ -25,6 +33,41 @@ class FrameObj:
         end_release.insert(0, name)
         er = self.SapModel.FrameObj.SetReleases(*end_release)
         return er
+    
+    def get_start_end_releases(self, frames):
+        '''
+        Get the start and end releases of frames.
+        etabs.SapModel.FrameObj.GetReleases returns:
+        [(False, False, False, False, True, True),
+        (False, False, False, False, True, True),
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        0]
+        The first two tuples are the start and end releases, the third is the start fixity and the fourth is the end fixity.
+        if one of fixity in start in all frame not zero, it is partially fixed, if any start release of all frame is 
+        '''
+        start_releases = set()
+        end_releases = set()
+        start_fixity = set()
+        end_fixity = set()
+        ret = ["Pinned", "Pinned"]
+        for name in frames:
+            releases = self.etabs.SapModel.FrameObj.GetReleases(name)
+            start_releases.add(releases[0])
+            end_releases.add(releases[1])
+            start_fixity.add(releases[2])
+            end_fixity.add(releases[3])
+        for i, release in enumerate((start_releases, end_releases)):
+            release = list(release)
+            if (len(release) == 1):
+                if len(set(release[0])) == 1 or set(release[0]) == {False}:
+                    ret[i] = "Fixed"
+            elif len(release) > 1:
+                ret[i] = "Pinned"
+        for i, fixity in enumerate((start_fixity, end_fixity)):
+            if len(fixity) > 1 or (len(fixity) == 1 and (len(set(fixity)) > 1 or sum(fixity.pop()) > 0)):
+                ret[i] = "Partially Fixed"
+        return ret
 
     def is_column(self, name):
         return self.SapModel.FrameObj.GetDesignOrientation(name)[0] == 1
@@ -51,16 +94,98 @@ class FrameObj:
         for frame in frame_names:
             self.set_section_name(frame, name)
 
+    def set_pier(self,
+                 names: list,
+                 pier_name: str="None",):
+        for name in names:
+            self.SapModel.FrameObj.SetPier(str(name), pier_name)
+
+    def get_section_type_and_geometry(self, frame_names: list) -> dict:
+        '''
+        return the section type, design type and geometrical properties of frames
+        '''
+        frame_props = self.SapModel.PropFrame.GetAllFrameProperties()
+        all_frames = self.SapModel.FrameObj.GetAllFrames()
+        section_types_map = {
+            1 : ['I', 'W'],
+            2 : ['Channel', 'PFC'],
+            3 : ['T', 'T'],
+            4 : ['Angle', 'L'],
+            6 : ['Box', 'RHS'],
+            7 : ['Pipe', 'CHS'],
+            8 : ['Rectangular', 'R'],
+            9 : ['Circle', 'C'],
+            40: ['steel_rod', 'C']
+        }
+        section_type_and_geometry = dict()
+        profiles = {}
+        for frame_name in frame_names:
+            i = all_frames[1].index(frame_name)
+            section_name = all_frames[2][i]
+            profile = profiles.get(section_name, None)
+            if profile is None:
+                if section_name:
+                    section_index = frame_props[1].index(section_name)
+                    section_type_num = frame_props[2][section_index]
+                    section_type = section_types_map.get(section_type_num, None)
+                else:
+                    section_type = None
+                if section_type is None:
+                    continue
+                width = frame_props[4][section_index]
+                height = frame_props[3][section_index]
+                tw = frame_props[6][section_index] # TW
+                tf = frame_props[5][section_index] # TF
+                width_b = frame_props[7][section_index] # widthB
+                tf_b = frame_props[8][section_index] # TFB
+                sec_type = section_type[1]
+                if "HS" not in sec_type and 'PFC' not in sec_type:
+                    if self.is_beam(frame_name):
+                        sec_type += 'B'
+                    elif self.is_column(frame_name):
+                        sec_type += 'C'
+                profile={
+                    'sec_type': sec_type,
+                    'b': width,
+                    'd': height,
+                    't_w': tw,
+                    't_f': tf,
+                    't': tf,
+                    'r_o': 0,  # Assuming no corner radius for RHS
+                    'r_1': 0,  # Assuming no corner radius for PFC
+                    # 'width_b': width_b,
+                    # 'tf_b': tf_b,
+                }
+                profiles[section_name] = profile
+            # if self.is_beam(frame_name):
+            #     design_type = 'Beam'
+            # elif self.is_column(frame_name):
+            #     design_type = 'Column'
+            # elif self.is_brace(frame_name):
+            #     design_type= 'Brace'
+            # x1, y1, z1 = (all_frames[6][i], all_frames[7][i], all_frames[8][i])
+            # x2, y2, z2 = (all_frames[9][i], all_frames[10][i], all_frames[11][i])
+            # length = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
+            props = copy.deepcopy(profile)
+            # props['length'] = length
+            # props['design_type'] = design_type
+            section_type_and_geometry[frame_name] = props
+        return section_type_and_geometry
+
     def set_end_length_offsets(self,
                                value: float=0.5,
                                ):
-        cols = ['UniqueName', 'OffsetOpt', 'OffsetI', 'OffsetJ', 'RigidFact', 'SelfWtOpt']
-        table_key = 'Frame Assignments - End Length Offsets'
-        df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
-        df.RigidFact = str(value)
-        if self.etabs.etabs_main_version < 20:
-            df.columns = ['UniqueName', 'Offset Option', 'Offset I', 'Offset J', 'Rigid Factor', 'Self Weight Option']
-        self.etabs.database.write(table_key, df)
+        self.etabs.SapModel.SelectObj.All()
+        self.etabs.SapModel.FrameObj.SetEndLengthOffset('', False, 0, 0, value, 2)
+        self.etabs.SapModel.FrameObj.SetEndLengthOffset('', True, 0, 0, value, 2)
+        self.etabs.SapModel.SelectObj.ClearSelection()
+        # cols = ['UniqueName', 'OffsetOpt', 'OffsetI', 'OffsetJ', 'RigidFact', 'SelfWtOpt']
+        # table_key = 'Frame Assignments - End Length Offsets'
+        # df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
+        # df.RigidFact = str(value)
+        # if self.etabs.etabs_main_version < 20:
+        #     df.columns = ['UniqueName', 'Offset Option', 'Offset I', 'Offset J', 'Rigid Factor', 'Self Weight Option']
+        # self.etabs.database.write(table_key, df)
 
     def is_frame_on_story(self, frame, story=None):
         if story is None:
@@ -135,18 +260,32 @@ class FrameObj:
         # Beams
         table_key = "Beam Object Connectivity"
         df = self.etabs.database.read(table_key=table_key, to_dataframe=True, cols=['UniqueName', 'Story'])
-        groups = df.groupby('Story')
-        for story, group in groups:
+        # Null Lines
+        table_key = "Null Line Object Connectivity"
+        if self.etabs.database.table_name_that_containe(table_key):
+            df_null = self.etabs.database.read(table_key=table_key, to_dataframe=True, cols=['UniqueName', 'Story'])
+            if hasattr(df, 'concat'):
+                df = df.concat(df_null, ignore_index=True)
+            elif hasattr(df, 'append'):
+                df = df.append(df_null)
+        beam_groups = df.groupby('Story')
+        for story, group in beam_groups:
             d[story] = [group['UniqueName']]
         # Columns
         table_key = "Column Object Connectivity"
         df = self.etabs.database.read(table_key=table_key, to_dataframe=True, cols=['UniqueName', 'Story'])
-        groups = df.groupby('Story')
-        for story, group in groups:
+        column_groups = df.groupby('Story')
+        for story, group in column_groups:
             story_frames = d.get(story, [])
             story_frames.append(group['UniqueName'])
             if len(story_frames) == 1: # Beams not exists on this story
                 story_frames.insert(0, [])
+                d[story] = story_frames
+        for story, group in beam_groups:
+            story_frames = d.get(story, [])
+            # story_frames.append(group['UniqueName'])
+            if len(story_frames) == 1: # columns not exists on this story
+                story_frames.insert(1, [])
                 d[story] = story_frames
         return d
     
@@ -160,9 +299,208 @@ class FrameObj:
             if label not in labels:
                 labels.append(label)
                 unique_names.append(frame)
-        return unique_names
+        return unique_names, labels
+    
+    def get_columns_type_names(self) -> dict:
+        '''
+        return the column types in a dict like 
+        { c1: [12, 22, 32], c2: [13, 23, 33], ...}
+        '''
+        ret = {}
+        columns = self.get_beams_columns(types=[1,2])[1]
+        labels = self.get_unique_frames(columns)[1]
+        stories = self.etabs.story.get_sorted_story_name(reverse=False, include_base=False)
+        for lable in labels:
+            names = []
+            for story in stories:
+                name = self.SapModel.FrameObj.GetNameFromLabel(lable, story)[0]
+                names.append(name)
+            ret[lable] = names
+        return ret
 
-    def get_columns_pmm_and_beams_rebars(self, frame_names):
+    def group_stacked_columns_by_points(self,
+        points_df: Union[pd.DataFrame, None]=None,
+        columns_df: Union[pd.DataFrame, None]=None,
+    ) -> list:
+        """
+        Group columns that are vertically stacked by common point names (not by coordinates).
+        Returns a list of lists, each sublist is sorted from bottom to top by Z.
+        If multiple columns connect at a point, only the longest is used in the chain.
+        """
+        if points_df is None:
+            points_df = self.etabs.database.get_points_connectivity()
+        if columns_df is None:
+            columns_df = self.etabs.database.read(
+                'Column Object Connectivity',
+                to_dataframe=True,
+                cols=['UniqueName', 'UniquePtI', 'UniquePtJ'],
+            )
+        # Build point Z lookup
+        point_z = points_df.set_index('UniqueName')['Z'].to_dict()
+        # Build column info: id -> (pt_low, pt_up, z_low, z_up, length)
+        col_info = {}
+        for _, row in columns_df.iterrows():
+            col_id = row['UniqueName']
+            pt_i, pt_j = row['UniquePtI'], row['UniquePtJ']
+            z_i, z_j = point_z[pt_i], point_z[pt_j]
+            if z_i <= z_j:
+                pt_low, pt_up, z_low, z_up = pt_i, pt_j, z_i, z_j
+            else:
+                pt_low, pt_up, z_low, z_up = pt_j, pt_i, z_j, z_i
+            length = abs(z_up - z_low)
+            col_info[col_id] = dict(
+                pt_low=pt_low, pt_up=pt_up, z_low=z_low, z_up=z_up, length=length
+            )
+        # Build mapping: pt_low -> [col_id], pt_up -> [col_id]
+        pt_low_map = {}
+        pt_up_map = {}
+        for col_id, info in col_info.items():
+            pt_low_map.setdefault(info['pt_low'], []).append(col_id)
+            pt_up_map.setdefault(info['pt_up'], []).append(col_id)
+        # Find base columns (those whose pt_low is not pt_up of any other column)
+        base_cols = []
+        for col_id, info in col_info.items():
+            if info['pt_low'] not in pt_up_map:
+                base_cols.append(col_id)
+        # Build chains
+        used_cols = set()
+        groups = []
+        for base_col in base_cols:
+            chain = []
+            curr_col = base_col
+            while curr_col is not None:
+                chain.append(curr_col)
+                used_cols.add(curr_col)
+                pt_up = col_info[curr_col]['pt_up']
+                next_cols = pt_low_map.get(pt_up, [])
+                # If multiple, pick the longest
+                next_col = None
+                if next_cols:
+                    if len(next_cols) > 1:
+                        # Pick the longest
+                        next_col = max(next_cols, key=lambda cid: col_info[cid]['length'])
+                    else:
+                        next_col = next_cols[0]
+                    if next_col in used_cols:
+                        break
+                else:
+                    next_col = None
+                curr_col = next_col
+            groups.append(chain)
+        # Add any unchained columns (not in any group)
+        for col_id in col_info:
+            if col_id not in used_cols:
+                groups.append([col_id])
+        # Sort each group bottom to top by z_low
+        for group in groups:
+            group.sort(key=lambda cid: col_info[cid]['z_low'])
+        return groups
+
+    @change_unit('N', 'mm')
+    def stacked_columns_dataframe_by_points(self,
+        points_df: Union[pd.DataFrame, None]=None,
+        columns_df: Union[pd.DataFrame, None]=None,
+        tolerance: float=1e-2,
+    ) -> pd.DataFrame:
+        """
+        Returns a DataFrame of stacked columns using point connectivity:
+        - Rows: unique Z levels (ascending), excluding the lowest Z.
+        - Columns: each stack/group.
+        - Cell: column UniqueName if present at that Z in that stack, else None.
+        """
+        if points_df is None:
+            points_df = self.etabs.database.get_points_connectivity()
+        if columns_df is None:
+            columns_df = self.etabs.database.read(
+                'Column Object Connectivity',
+                to_dataframe=True,
+                cols=['UniqueName', 'UniquePtI', 'UniquePtJ'],
+            )
+        groups = self.group_stacked_columns_by_points(points_df=points_df, columns_df=columns_df)
+        # Build point Z lookup
+        point_z = points_df.set_index('UniqueName')['Z'].to_dict()
+        # Build a dict: col_id -> (z_low, z_up)
+        col_z_bounds = {}
+        for _, row in columns_df.iterrows():
+            col_id = row['UniqueName']
+            pt_i, pt_j = row['UniquePtI'], row['UniquePtJ']
+            z_i, z_j = point_z[pt_i], point_z[pt_j]
+            z_low, z_up = sorted([z_i, z_j])
+            col_z_bounds[col_id] = (z_low, z_up)
+        # Collect all unique Z levels
+        z_levels = set()
+        for z_low, z_up in col_z_bounds.values():
+            z_levels.add(z_low)
+            z_levels.add(z_up)
+        z_levels = sorted(z_levels, reverse=True)
+        # Exclude the lowest Z
+        if len(z_levels) > 1:
+            z_levels = z_levels[:-1]
+        # Build DataFrame
+        data = []
+        for z in z_levels:
+            row = []
+            for group in groups:
+                col_at_z = None
+                for col_id in group:
+                    z_low, z_up = col_z_bounds[col_id]
+                    if z_low < z <= z_up or math.isclose(z, z_up, abs_tol=tolerance):
+                        col_at_z = col_id
+                        break
+                row.append(col_at_z)
+            data.append(row)
+        df = pd.DataFrame(data, index=z_levels)
+        story_elevation = self.etabs.story.get_sorted_story_and_levels()
+        indexes = self.replace_story_with_elevation(df.index, story_elevation)
+        df.index = indexes
+        df.columns = get_column_labels(df, self.etabs)
+        return df
+
+    @staticmethod
+    def replace_story_with_elevation(elevations, story_elevation):
+        '''
+        Replace story names in elevations with their corresponding elevation values.
+        '''
+        stories = []
+        for elev in elevations:
+            found = False
+            for story, story_elev in story_elevation:
+                if math.isclose(float(elev), story_elev, abs_tol=1):
+                    stories.append(story)
+                    found = True
+                    break
+            if not found:
+                stories.append(str(elev))
+        return stories
+
+    def get_columns_type_sections(self,
+                                  dataframe: bool=False,
+                                  ) -> Union[dict, pd.DataFrame]:
+        '''
+        return the column type sections in a dict like 
+        { c1: ['C5012A', 'C5012AC', 'C5012C'], c2: [...], ...}
+        '''
+        ret = {}
+        columns_type_names = self.get_columns_type_names()
+        for key, value in columns_type_names.items():
+            sections = []
+            for name in value:
+                if name is None:
+                    sections.append(None)
+                else:
+                    sections.append(self.get_section_name(name))
+            ret[key] = sections
+        if dataframe:
+            df = pd.DataFrame(ret)
+            stories = self.etabs.story.get_sorted_story_name(reverse=False, include_base=False)
+            df.set_index(pd.Index(stories), inplace=True)
+            ret = pd.DataFrame(df).iloc[::-1]
+            df1 = pd.DataFrame(columns_type_names)
+            df1.set_index(pd.Index(stories), inplace=True)
+            columns_type_names = pd.DataFrame(df1).iloc[::-1]
+        return ret, columns_type_names
+
+    def get_columns_pmm_and_beams_rebars(self, frame_names: Union[Iterable, None]=None):
         if not self.SapModel.GetModelIsLocked():
             self.etabs.analyze.set_load_cases_to_analyze()
             self.etabs.run_analysis()
@@ -173,8 +511,9 @@ class FrameObj:
             self.SapModel.DesignConcrete.StartDesign()
         self.etabs.set_current_unit('kgf', 'cm')
         beams, columns = self.get_beams_columns()
-        beams = set(frame_names).intersection(beams)
-        columns = set(frame_names).intersection(columns)
+        if frame_names is not None:
+            beams = set(frame_names).intersection(beams)
+            columns = set(frame_names).intersection(columns)
         columns_pmm = dict()
         for col in columns:
             pmm = max(self.SapModel.DesignConcrete.GetSummaryResultsColumn(col)[6])
@@ -187,6 +526,8 @@ class FrameObj:
             d['TopArea'] = beam_rebars[4]
             d['BotArea'] = beam_rebars[6]
             d['VRebar'] = beam_rebars[8]
+            d['TorsionLong'] = beam_rebars[10]
+            d['TorsionLat'] = beam_rebars[12]
             beams_rebars[name] = d
         return columns_pmm, beams_rebars
 
@@ -244,6 +585,8 @@ class FrameObj:
                     name: str = '',
                     weakness_filename : Union[str, Path] = "weakness.EDB",
                     dir_ : str = 'x',
+                    dynamic: bool=False,
+                    d: Union[dict, None] = None,
                     ):
         if not name:
             try:
@@ -268,6 +611,47 @@ class FrameObj:
             self.etabs.lock_and_unlock_model()
             print('multiply earthquake factor with 0.67')
             self.etabs.database.multiply_seismic_loads(.67)
+            if dynamic:
+                if d is None:
+                    d = self.etabs.get_settings_from_model()
+                ex_name = d.get("ex_combobox")
+                ey_name = d.get("ey_combobox")
+                x_scale_factor = float(d.get("x_scalefactor_combobox", 1.0))
+                y_scale_factor = float(d.get("y_scalefactor_combobox", 1.0))
+                if d.get("combination_response_spectrum_checkbox", False):
+                    print("Start 100-30 Scale Response Spectrum\n")
+                    sx, sxe, sy, sye = self.etabs.get_dynamic_loadcases(d)
+                    x_specs = [sx, sxe]
+                    y_specs = [sy, sye]
+                    self.etabs.scale_response_spectrums(
+                        ex_name,
+                        ey_name,
+                        x_specs,
+                        y_specs,
+                        x_scale_factor,
+                        y_scale_factor,
+                        analyze=False,
+                        consider_min_static_base_shear=False,
+                        d=d,
+                    )
+                elif d.get("angular_response_spectrum_checkbox", False):
+                    print("Start angular Scale Response Spectrum\n")
+                    specs = []
+                    section_cuts = []
+                    key = "angular_tableview"
+                    dic = d.get(key, None)
+                    if dic is not None:
+                        for sec_cut, spec in dic.values():
+                            section_cuts.append(sec_cut)
+                            specs.append(spec)
+                        self.etabs.angles_response_spectrums_analysis(
+                            ex_name,
+                            ey_name,
+                            specs,
+                            section_cuts,
+                            x_scale_factor,
+                            analyze=False,
+                        )
             self.set_end_release_frame(name)
         print('get columns pmm and beams rebars')
         columns_pmm_weakness, beams_rebars_weakness = self.get_columns_pmm_and_beams_rebars(story_frames)
@@ -304,6 +688,19 @@ class FrameObj:
         for name in beam_names:
             modifiers = list(self.SapModel.FrameObj.GetModifiers(name)[0])
             modifiers[3] = j
+            self.SapModel.FrameObj.SetModifiers(name, modifiers)
+    
+    def multiply_modifiers(self,
+                mult: list= 8*[1.4],
+                frame_names: Union[None, list]=None,
+                ):
+        assert min(mult) >= 0
+        if frame_names is None:
+            frame_names, _ = self.get_beams_columns(2)
+        self.SapModel.SetModelIsLocked(False)
+        for name in frame_names:
+            modifiers = list(self.SapModel.FrameObj.GetModifiers(name)[0])
+            modifiers = [min(modifiers[i] * mult[i], 1) for i in range(len(modifiers))]
             self.SapModel.FrameObj.SetModifiers(name, modifiers)
     
     def apply_torsion_stiffness_coefficient(self,
@@ -343,7 +740,6 @@ class FrameObj:
             beams_names, _ = self.get_beams_columns(types=[1,2,3])
         table_key = "Frame Assignments - Property Modifiers"
         cols = ['Story', 'Label', 'UniqueName', 'AMod', 'WMod']
-        import pandas as pd
         df = pd.DataFrame(beams_names, columns=['UniqueName'])
         df['AMod_Beam'] = 1
         df['WMod_Beam'] = 1
@@ -388,7 +784,7 @@ class FrameObj:
         beams_sections = {name : self.SapModel.FrameObj.GetSection(name)[0] for name in beams_names}
         return beams_sections
     
-    @change_unit('N', 'cm')
+    @change_unit('kgf', 'cm')
     def assign_frame_modifiers(self,
             frame_names: list,
             area: Union[None, float]=None,
@@ -539,7 +935,16 @@ class FrameObj:
         if x2 == x1:
             return 90
         return math.degrees(math.atan((y2 - y1) / (x2 - x1)))
-        
+    
+    def get_frame_direction(self,
+        name: str,
+        ):
+        x1, y1, x2, y2 = self.get_xy_of_frame_points(name)
+        if x2 == x1 or abs(y2 - y1) > abs(x2 - x1):
+            return 'y'
+        else:
+            return 'x'
+
     def get_xy_of_frame_points(self, name : str):
         p1_name, p2_name, _ = self.SapModel.FrameObj.GetPoints(name)
         x1, y1 = self.SapModel.PointObj.GetCoordCartesian(p1_name)[:2]
@@ -551,11 +956,13 @@ class FrameObj:
             unit: Union[str, bool]=None,
             ):
         if unit is not None:
-            force_unit, _ = self.etabs.get_current_unit()
-            self.etabs.set_current_unit(force_unit, unit)
+            curr_unit = self.etabs.get_current_unit()
+            self.etabs.set_current_unit(curr_unit[0], unit)
         p1_name, p2_name, _ = self.SapModel.FrameObj.GetPoints(name)
         x1, y1, z1 = self.SapModel.PointObj.GetCoordCartesian(p1_name)[:3]
         x2, y2, z2 = self.SapModel.PointObj.GetCoordCartesian(p2_name)[:3]
+        if unit is not None:
+            self.etabs.set_current_unit(*curr_unit)
         return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
 
     def offset_frame(self, 
@@ -571,16 +978,24 @@ class FrameObj:
                 return
         lines = []
         for name in names:
-            p1_name, p2_name, _ = self.SapModel.FrameObj.GetPoints(name)
-            x1, y1, z1 = self.SapModel.PointObj.GetCoordCartesian(p1_name)[:3]
-            x2, y2 = self.SapModel.PointObj.GetCoordCartesian(p2_name)[:2]
-            x1_offset, y1_offset, x2_offset, y2_offset = self.offset_frame_points(x1, y1, x2, y2, distance, neg)
-            line = self.SapModel.FrameObj.AddByCoord(x1_offset, y1_offset, z1, x2_offset, y2_offset, z1)[0]
+            x1_offset, y1_offset, z1, x2_offset, y2_offset, z2 = self.get_offset_coordinate_of_beam_in_plan(name, distance, neg)
+            line = self.SapModel.FrameObj.AddByCoord(x1_offset, y1_offset, z1, x2_offset, y2_offset, z2)[0]
             lines.append(line)
         self.SapModel.SelectObj.ClearSelection()
         self.SapModel.View.RefreshView()
         return lines
-
+    
+    def get_offset_coordinate_of_beam_in_plan(self,
+                              frame_name: str,
+                              distance: float,
+                              neg: bool=False,
+                              ):
+        p1_name, p2_name, _ = self.SapModel.FrameObj.GetPoints(frame_name)
+        x1, y1, z1 = self.SapModel.PointObj.GetCoordCartesian(p1_name)[:3]
+        x2, y2, z2 = self.SapModel.PointObj.GetCoordCartesian(p2_name)[:3]
+        x1_offset, y1_offset, x2_offset, y2_offset = self.offset_frame_points(x1, y1, x2, y2, distance, neg)
+        return x1_offset, y1_offset, z1, x2_offset, y2_offset, z2
+    
     @staticmethod
     def offset_frame_points(x1, y1, x2, y2, distance, neg:bool):
         if x2 == x1:
@@ -972,7 +1387,16 @@ class FrameObj:
         return names
 
     def all_section_names(self):
-        return self.SapModel.PropFrame.GetNameList()[1]
+        try:
+            ret = self.SapModel.PropFrame.GetNameList()[1]
+        except:
+            table_key = "Frame Section Property Definitions - Summary"
+            df_sec = self.etabs.database.read(table_key, to_dataframe=True)
+            if df_sec is None:
+                return []
+            ret = df_sec['Name'].unique().tolist()
+        return ret
+
 
     def other_sections(self, sections):
         '''
@@ -997,24 +1421,25 @@ class FrameObj:
             sec_type : str = 'other',
             ) -> None:
         if frame_names is None:
+            selected_frames = self.etabs.select_obj.get_selected_obj_type(2) # 2: frame
             frame_names = []
-            types, all_names = self.SapModel.SelectObj.GetSelected()[1:3]
             func = None
             if sec_type == 'beam':
                 func  = self.is_beam
             elif sec_type == 'column':
                 func = self.is_column
-            for t, name in zip(types, all_names):
-                if t == 2:
-                    if func is None:
+            for name in selected_frames:
+                if func is None:
+                    frame_names.append(name)
+                else:
+                    if func(name):
                         frame_names.append(name)
-                    else:
-                        if func(name):
-                            frame_names.append(name)
         if stories is None:
             stories = self.SapModel.Story.GetNameList()[1]
         for name in frame_names:
             curr_names = self.get_above_frames(name, stories)
+            if len(curr_names) == 0:
+                curr_names = [name]
             self.assign_sections(sec_name, curr_names)
         self.SapModel.View.RefreshView()
         return None
@@ -1254,6 +1679,18 @@ class FrameObj:
             cover = 6 * multiply.get(len_unit)
         return (b * (h - cover))
     
+    def get_section_area(self,
+                         names: Union[list, None]=None,
+                         ):
+        table_key = "Frame Section Property Definitions - Summary"
+        cols = ['Name', 'Area']
+        df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
+        if names is not None:
+            filt = df['Name'].isin(names)
+            df = df.loc[filt]
+        df['Area'] = df['Area'].astype(float)
+        return df.set_index('Name').to_dict()['Area']
+    
     def delete_frames(self,
                       frames: Union[list, None]=None,
                       ) -> None:
@@ -1262,6 +1699,60 @@ class FrameObj:
         else:
             for frame in frames:
                 self.SapModel.FrameObj.Delete(frame)
+
+    def set_end_release_for_columns_with_pier_label(self,
+                                                    piers: Union[str, list, None]= None,
+                                                    ):
+        pier_cols = self.etabs.pier.get_columns_names_with_pier_label(piers)
+        for pier, story_col in pier_cols.items():
+            for story, cols in story_col.items():
+                for col in cols:
+                    self.etabs.frame_obj.set_end_release_frame(col)
+
+    def set_lateral_bracing(self,
+                            names: list,
+                            type_: int=2, # 1: Point bracing, 2: Uniform bracing
+                            loc: int=1, # 1: top, 2: bottom, 3: all (top and bottom)
+                            dist1: float=0, # the location of the point bracing. When type_ = 2, this is the location of the start of the uniform bracing
+                            dist2: float=1, # This items is not used when type_ = 1. When type_ = 2, this is the location of the end of the uniform bracing
+                            relative: bool=True,
+                            ):
+        rets = []
+        for name in names:
+            ret = self.SapModel.FrameObj.SetLateralBracing(
+                name,
+                type_,
+                loc,
+                dist1,
+                dist2,
+                relative,
+            )
+            rets.append(ret)
+        return rets
+    
+    def get_lateral_bracing(self,
+                            name: list,
+                            ):
+        tops = []
+        bots = []
+        try:
+            ret = self.SapModel.FrameObj.GetLateralBracing(name)
+        except IndexError:
+            return tops, bots
+        for i in range(ret[0]):
+            if ret[2][i] == 1: # point bracing
+                bound = ret[6][i]
+            else:
+                bound = [ret[6][i], ret[7][i]]
+            if ret[3][i] == 1: # top
+                tops.append(bound)
+            if ret[3][i] == 2: # bot
+                bots.append(bound)
+            if ret[3][i] == 3: # top & bot
+                tops.append(bound)
+                bots.append(bound)
+        return tops, bots
+
 
 
 

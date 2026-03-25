@@ -1,18 +1,33 @@
 from pathlib import Path
+import enum
 
-from PySide2.QtWidgets import QMessageBox
+from PySide.QtGui import QMessageBox
 
 import FreeCAD
 if FreeCAD.GuiUp:
     import FreeCADGui as Gui
 
+import importlib
 import etabs_obj
+importlib.reload(etabs_obj)
 
+
+@enum.unique
+class SoftwareName(enum.IntEnum):
+    ETABS = 0
+    SAP2000 = 1
+    SAFE = 2
+
+@enum.unique
+class SoftwareExtension(enum.Enum):
+    ETABS = '.EDB'
+    SAP2000 = '.SDB'
+    SAFE = '.FDB'
 
 def open_browse(
         ext: str = '.EDB',
         ):
-    from PySide2.QtWidgets import QFileDialog
+    from PySide.QtGui import QFileDialog
     filters = f"{ext[1:]} (*{ext})"
     filename, _ = QFileDialog.getOpenFileName(None, 'select file',
                                             None, filters)
@@ -27,7 +42,7 @@ def find_etabs(
     backup=False,
     filename=None,
     show_warning: bool = True,
-    software: str='etabs',
+    # software: str='ETABS',
     ):
     '''
     try to find etabs in this manner:
@@ -37,9 +52,54 @@ def find_etabs(
     run : if True it runs the model
     backup: if True it backup from the main file
     '''
+    param = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/civilTools")
+    pid_moniker = param.GetString("pid_moniker", 'None')
+    success = False
+    if pid_moniker != 'None':
+        class_name, pid = parse_etabs_rot_entry(pid_moniker)
+        print(f"try to connect to {class_name=} with process ID = {pid}")
+        software = class_name.split(".")[1]
+        try:
+            etabs = etabs_obj.EtabsModel(backup=backup, software=software, pid_moniker=[class_name, pid])
+            if hasattr(etabs, 'SapModel'):
+                success = True
+            else:
+                raise ProcessLookupError
+        except ProcessLookupError as e:
+            print(f"Failed to connect to {class_name} with process ID = {pid}\n{e}")
+            exe_path = param.GetString("last_exe_path_software", 'None')
+            print(f"{exe_path=}")
+            if exe_path != 'None':
+                softwares = get_process_of_exe_path(exe_path)
+                # if len(softwares) == 1:
+                pid = softwares[0]
+                try:
+                    etabs = etabs_obj.EtabsModel(backup=backup, software=software, pid_moniker=[class_name, pid])
+                    if hasattr(etabs, 'SapModel'):
+                        pid_moniker = f"!{class_name}:{pid}"
+                        param.SetString("pid_moniker", pid_moniker)
+                        success = True
+                    else:
+                        raise ProcessLookupError
+                except ProcessLookupError as e:
+                    print(f"Failed to connect to {class_name} with process ID = {pid}\n{e}")
+                # else:
+                #     model_names = []
+                #     for pid in softwares:
+                #         etabs = etabs_obj.EtabsModel(backup=False, software=software, pid_moniker=[class_name, pid])
+                #         name = etabs.get_filepath()
+                #         model_names.append(str(name))
+                    
 
-    # try to connect to opening etabs software
-    etabs = etabs_obj.EtabsModel(backup=backup, software=software)
+                        
+            success = False
+        print(f"Find {software} Software with PID Moniker: {pid_moniker}, Success: {success}")
+    if not success:
+        software_number = param.GetInt("software_name", 0)
+        software = SoftwareName(software_number).name
+        print(f"Try to connect to opening {software} software")
+        # try to connect to opening etabs software
+        etabs = etabs_obj.EtabsModel(backup=backup, software=software)
 
     # if not etabs.success:
     #     pass
@@ -58,7 +118,8 @@ def find_etabs(
         etabs.success and
         hasattr(etabs, 'SapModel')
         ):
-        filename = open_browse()
+        ext = SoftwareExtension[software].value
+        filename = open_browse(ext)
     if filename is None and etabs.success and show_warning:
         QMessageBox.warning(None, software, f'Please Open {software} Model and Run this command again.')
     elif (
@@ -88,22 +149,56 @@ def find_etabs(
         filename = Path(filename)
     return etabs, filename
 
+def get_process_of_exe_path(exe_path: Path) -> list:
+    try:
+        import psutil
+    except ImportError:
+        import freecad_funcs
+        freecad_funcs.install_package(psutil)
+        import psutil
+    softwares = []
+    for pid in psutil.pids():
+        try:
+            exe = psutil.Process(pid).exe()
+            if exe == str(exe_path):
+                softwares.append(pid)
+        except psutil.AccessDenied:
+            pass
+        except psutil.NoSuchProcess:
+            pass
+    return softwares
+
+
+def parse_etabs_rot_entry(entry: str):
+    """
+    Parse ROT entry formatted as:
+        "!ETABSv1.Model:12345"
+    Returns:
+        (class_name, pid)
+    """
+    if not entry.startswith("!"):
+        raise ValueError("Unexpected ROT entry format")
+
+    entry = entry[1:]
+    class_name, pid_str = entry.split(":")
+    return class_name, int(pid_str)
+
 def get_mdiarea():
     """ Return FreeCAD MdiArea. """
-    import PySide2
+    import PySide
     mw = Gui.getMainWindow()
     if not mw:
         return None
     childs = mw.children()
     for c in childs:
-        if isinstance(c, PySide2.QtWidgets.QMdiArea):
+        if isinstance(c, PySide.QtGui.QMdiArea):
             return c
     return None
 
 def get3dview():
-    from PySide2 import QtWidgets
+    from PySide import QtGui
     mw = Gui.getMainWindow()
-    childs=mw.findChildren(QtWidgets.QMainWindow)
+    childs=mw.findChildren(QtGui.QMainWindow)
     for i in childs:
         if i.metaObject().className() == "Gui::View3DInventor":
             return i

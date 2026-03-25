@@ -26,7 +26,8 @@ dependencies = [
     "pandas",
     "psutil",
     "numpy",
-    ]
+    "math2docx>=2.0.3",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/ebrahimraeyat/etabs_api"

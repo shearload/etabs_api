@@ -1,146 +1,15 @@
 from pathlib import Path
+import math
 from typing import Iterable, Union
 
 import numpy as np
 
+from csi_safe import safe
 
-__all__ = ['Safe', 'CreateF2kFile']
-
-
-class Safe():
-    def __init__(self,
-            input_f2k_path : Path = None,
-            output_f2k_path : Path = None,
-        ) -> None:
-        self.input_f2k_path = input_f2k_path
-        if output_f2k_path is None:
-            output_f2k_path = input_f2k_path
-        self.output_f2k_path = output_f2k_path
-        self.__file_object = None
-        self.tables_contents = None
-
-    def __enter__(self):
-        self.__file_object = open(self.input_f2k_path, 'r')
-        return self.__file_object
-
-    def __exit__(self, type, val, tb):
-        self.__file_object.close()
-
-    def get_tables_contents(self):
-        with open(self.input_f2k_path, 'r') as reader:
-            lines = reader.readlines()
-            tables_contents = dict()
-            n = len("TABLE:  ")
-            context = ''
-            table_key = None
-            for line in lines:
-                if line.startswith("TABLE:"):
-                    if table_key and context:
-                        tables_contents[table_key] = context
-                    context = ''
-                    table_key = line[n+1:-2]
-                else:
-                    context += line
-        self.tables_contents = tables_contents
-        return tables_contents
-
-    def get_points_coordinates(self,
-            content : str = None,
-            ) -> dict:
-        if content is None:
-            content = self.tables_contents["OBJECT GEOMETRY - POINT COORDINATES"]
-        lines = content.split('\n')
-        points_coordinates = dict()
-        for line in lines:
-            if not line:
-                continue
-            line = line.lstrip(' ')
-            fields_values = line.split()
-            coordinates = []
-            for i, field_value in enumerate(fields_values[:-1]):
-                if i == 0:
-                    point_name = str(field_value.split('=')[1])
-                else:
-                    value = float(field_value.split('=')[1])
-                    coordinates.append(value)
-            points_coordinates[point_name] = coordinates
-        return points_coordinates
-
-    def is_point_exist(self,
-            coordinate : list,
-            content : Union[str, bool] = None,
-            ):
-        points_coordinates = self.get_points_coordinates(content)
-        for id, coord in points_coordinates.items():
-            if coord == coordinate:
-                return id
-        return None
-                    
-    def add_content_to_table(self, table_key, content):
-        curr_content = self.tables_contents.get(table_key, '')
-        self.tables_contents[table_key] = curr_content + content
-        return None
-
-    def force_length_unit(self,
-        content : Union[str, bool] = None,
-        ):
-        if content is None:
-            if self.tables_contents is None:
-                self.get_tables_contents()
-            table_key = "PROGRAM CONTROL"
-            content = self.tables_contents.get(table_key, None)
-            if content is None:
-                return
-        label = 'CurrUnits="'
-        init_curr_unit = content.find(label)
-        init_unit_index = init_curr_unit + len(label)
-        end_unit_index = content[init_unit_index:].find('"') + init_unit_index
-        force, length, _ = content[init_unit_index: end_unit_index].split(', ')
-        self.force_unit, self.length_unit = force, length
-        self.force_units = self.get_force_units(self.force_unit)
-        self.length_units = self.get_length_units(self.length_unit)
-        return force, length
-
-    def write(self):
-        if self.tables_contents is None:
-            self.get_tables_contents()
-        with open(self.output_f2k_path, 'w') as writer:
-            for table_key, content in self.tables_contents.items():
-                writer.write(f'\n\nTABLE:  "{table_key}"\n')
-                writer.write(content)
-            writer.write("\nEND TABLE DATA")
-        return None
-
-    def get_force_units(self, force_unit : str):
-        '''
-        force_unit can be 'N', 'KN', 'Kgf', 'tonf'
-        '''
-        if force_unit == 'N':
-            return dict(N=1, KN=1000, Kgf=9.81, tonf=9810)
-        elif force_unit == 'KN':
-            return dict(N=.001, KN=1, Kgf=.00981, tonf=9.81)
-        elif force_unit == 'Kgf':
-            return dict(N=1/9.81, KN=1000/9.81, Kgf=1, tonf=1000)
-        elif force_unit == 'tonf':
-            return dict(N=.000981, KN=.981, Kgf=.001, tonf=1)
-        else:
-            raise KeyError
-
-    def get_length_units(self, length_unit : str):
-        '''
-        length_unit can be 'mm', 'cm', 'm'
-        '''
-        if length_unit == 'mm':
-            return dict(mm=1, cm=10, m=1000)
-        elif length_unit == 'cm':
-            return dict(mm=.1, cm=1, m=100)
-        elif length_unit == 'm':
-            return dict(mm=.001, cm=.01, m=1)
-        else:
-            raise KeyError
+__all__ = ['CreateF2kFile']
 
 
-class CreateF2kFile(Safe):
+class CreateF2kFile(safe.Safe16):
     '''
     load_cases : load cases that user wants to imported in f2k file
     case_types : load case types that user wants to import in f2k file
@@ -164,7 +33,8 @@ class CreateF2kFile(Safe):
         self.etabs = etabs
         self.etabs.set_current_unit('N', 'mm')
         if model_datum is None:
-            model_datum = self.etabs.story.get_base_name_and_level()[1]
+            # model_datum = self.etabs.story.get_base_name_and_level()[1]
+            model_datum = 0
         self.model_datum = model_datum
         if load_cases is None:
             load_cases = self.etabs.load_cases.get_load_cases()
@@ -185,7 +55,7 @@ class CreateF2kFile(Safe):
 
     def add_grids(self):
         table_key = 'Grid Definitions - Grid Lines'
-        cols = ['LineType', 'ID', 'Ordinate']
+        cols = ['LineType', 'ID', 'Ordinate', 'BubbleLoc']
         df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
         filt = df.LineType.isin(('X (Cartesian)', 'Y (Cartesian)'))
         df = df.loc[filt]
@@ -196,10 +66,12 @@ class CreateF2kFile(Safe):
         df.replace({'LineType' : replacements}, inplace=True)
         df.insert(loc=0, column='CoordSys', value='CoordSys=GLOBAL')
         df['ID'] = '"' +  df['ID'] + '"'
+        df['BubbleSize'] = 'BubbleSize=1200'
         d = {
             'LineType': 'AxisDir=',
             'ID': 'GridID=',
-            'Ordinate' : 'Ordinate='
+            'Ordinate' : 'Ordinate=',
+            'BubbleLoc': 'BubbleLoc='
             }
         content = self.add_assign_to_fields_of_dataframe(df, d)
         table_key = "GRID LINES"
@@ -349,8 +221,9 @@ class CreateF2kFile(Safe):
         self.add_content_to_table(table_key, content_loadpatts)
         return content_loadcase
         
-    def add_point_loads(self):
+    def add_point_loads(self, append: bool = True):
         self.etabs.load_cases.select_all_load_cases()
+        self.etabs.run_analysis()
         table_key = "Joint Design Reactions"
         cols = ['Label', 'UniqueName', 'OutputCase', 'CaseType', 'FX', 'FY', 'FZ', 'MX', 'MY', 'MZ']
         df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
@@ -390,19 +263,20 @@ class CreateF2kFile(Safe):
             }
         content = self.add_assign_to_fields_of_dataframe(df, d)
         table_key = "LOAD ASSIGNMENTS - POINT LOADS"
-        self.add_content_to_table(table_key, content)
+        self.add_content_to_table(table_key, content, append=append)
         return content
     
     def add_load_combinations(
                 self,
-                types: Iterable = ('Envelope', 'Linear Add'),
+                types: Iterable = [],
                 load_combinations: Union[list, bool] = None,
                 ignore_dynamics : bool = False,
         ):
+        if not types:
+            types = self.etabs.load_combinations.combotyp._member_names_
+            types = [t.replace('_', ' ') for t in types]
         self.etabs.load_cases.select_all_load_cases()
-        table_key = "Load Combination Definitions"
-        cols = ['Name', 'LoadName', 'Type', 'SF']
-        df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
+        df = self.etabs.load_combinations.get_table_of_load_combinations()
         df.fillna(method='ffill', inplace=True)
         # remove dynamic load combinations
         if ignore_dynamics:
@@ -474,6 +348,90 @@ class CreateF2kFile(Safe):
         if content:
             return df.to_string(header=False, index=False)
         return df
+    
+class ModifyF2kFile(CreateF2kFile):
+    def __init__(self,
+            input_f2k,
+            etabs = None,
+            load_cases : list = None,
+            case_types : list = None,
+            model_datum : float = None,
+            ):
+        append = True
+        super().__init__(input_f2k, etabs, load_cases, case_types, model_datum, append)
+    def set_unit_of_model_according_to_f2k(self):
+        force, length = self.force_length_unit()
+        self.etabs.set_current_unit(force, length)
+
+    def add_point_loads(self):
+        #  set units of model according to f2k file
+        self.set_unit_of_model_according_to_f2k()
+        self.etabs.load_cases.select_all_load_cases()
+        self.etabs.run_analysis()
+        table_key = "Joint Design Reactions"
+        cols = ['Label', 'UniqueName', 'OutputCase', 'CaseType', 'FX', 'FY', 'FZ', 'MX', 'MY', 'MZ']
+        df = self.etabs.database.read(table_key, to_dataframe=True, cols=cols)
+        drift_names = self.etabs.load_patterns.get_drift_load_pattern_names()
+        dynamic_drift_loadcases = self.etabs.get_dynamic_drift_loadcases()
+        drift_names.extend(dynamic_drift_loadcases)
+        filt = df.OutputCase.isin(drift_names)
+        df = df.loc[~filt]
+        filt = df.CaseType.isin(('LinStatic', 'LinRespSpec'))
+        df = df.loc[filt]
+        df.UniqueName.fillna(df.Label, inplace=True)
+        df.drop(columns=['Label', 'CaseType'], inplace=True)
+        for col in ('FX', 'FY', 'MX', 'MY', 'MZ'):
+            df[col] = -df[col].astype(float)
+        try:
+            df2 = self.etabs.database.get_basepoints_coord_and_dims(df)
+            df2 = df2.set_index('UniqueName')
+            df['xdim'] = df['UniqueName'].map(df2['t2'])
+            df['ydim'] = df['UniqueName'].map(df2['t3'])
+            # Replace None values with 0 in specific columns
+            columns_to_replace = ['xdim', 'ydim']
+            df[columns_to_replace] = df[columns_to_replace].fillna(0)
+        except (AttributeError, TypeError):
+            df['xdim'] = 0
+            df['ydim'] = 0
+        df = df.astype({'UniqueName': str})
+        # check if point exist in model, if not add it
+        exist_points = {}
+        not_exist_points_content = ''
+        curr_point_content = self.get_points_contents()
+        for p in df.UniqueName.unique():
+            coord = list(self.etabs.points.get_point_coordinate(str(p)))
+            coord[2] = self.model_datum
+            self.model_datum
+            print(coord)
+            exist_id = self.is_point_exist(coord, curr_point_content)
+            if exist_id:
+                exist_points[p] = exist_id
+            else:
+                last_number = self.get_last_point_number(curr_point_content + not_exist_points_content)
+                exist_points[p] = str(last_number)
+                not_exist_points_content += f'\nPoint={last_number}   GlobalX={coord[0]}   GlobalY={coord[1]}   GlobalZ={coord[2]}   SpecialPt=Yes'
+        if not_exist_points_content:
+            table_key = "OBJECT GEOMETRY - POINT COORDINATES"
+            self.add_content_to_table(table_key, not_exist_points_content, append=True)
+
+        df['UniqueName'] = df['UniqueName'].map(exist_points).fillna(df['UniqueName'])
+        d = {
+            'UniqueName': 'Point=',
+            'OutputCase': 'LoadPat=',
+            'FX'  : 'Fx=',
+            'FY'  : 'Fy=',
+            'FZ'  : 'Fgrav=',
+            'MX'  : 'Mx=',
+            'MY'  : 'My=',
+            'MZ'  : 'Mz=',
+            'xdim' : 'XDim=',
+            'ydim' : 'YDim=',
+            }
+        content = self.add_assign_to_fields_of_dataframe(df, d)
+        table_key = "LOAD ASSIGNMENTS - POINT LOADS"
+        self.add_content_to_table(table_key, content, append=False)
+        return content
+        
 
 def get_design_type(case_name, etabs):
     '''

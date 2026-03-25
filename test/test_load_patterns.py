@@ -47,6 +47,11 @@ def test_get_drift_load_pattern_names():
     assert len(names) == 2
     assert names == ['EXDRIFT', 'EYDRIFT']
 
+@open_etabs_file('steel.EDB')
+def test_get_notional_load_pattern_names():
+    names = etabs.load_patterns.get_notional_load_pattern_names()
+    assert len(names) == 12
+
 @open_etabs_file('shayesteh.EDB')
 def test_get_load_patterns():
     load_pattern_names = etabs.load_patterns.get_load_patterns()
@@ -56,6 +61,12 @@ def test_get_load_patterns():
 def test_get_xy_seismic_load_patterns():
     names = etabs.load_patterns.get_xy_seismic_load_patterns()
     assert len(names) == 6
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_xy_seismic_load_patterns_separate():
+    x_names, y_names = etabs.load_patterns.get_xy_seismic_load_patterns_separate()
+    assert len(x_names) == 3
+    assert len(y_names) == 3
 
 @open_etabs_file('shayesteh.EDB')
 def test_get_xy_spectral_load_patterns_with_angle():

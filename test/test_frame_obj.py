@@ -1,13 +1,24 @@
 import sys
 from pathlib import Path
 import pytest
+import math
 
 import numpy as np
+import pandas as pd
 
 etabs_api_path = Path(__file__).parent.parent
 sys.path.insert(0, str(etabs_api_path))
 
 from shayesteh import etabs, open_etabs_file, version
+
+@open_etabs_file('madadi.EDB')
+def test_get_start_end_releases():
+    ret = etabs.frame_obj.get_start_end_releases(['215', '157', '152', '150', '123'])
+    assert ret == ['Fixed', 'Fixed']
+    ret = etabs.frame_obj.get_start_end_releases(['15', '16', '19', '20'])
+    assert ret == ['Pinned', 'Pinned']
+    ret = etabs.frame_obj.get_start_end_releases(['15', '157', '152', '150', '123'])
+    assert ret == ['Pinned', 'Pinned']
 
 @open_etabs_file('shayesteh.EDB')
 def test_get_beams_columns():
@@ -20,6 +31,37 @@ def test_get_beams_columns():
     assert len(beams) == len(columns) == 0
     beams, columns = etabs.frame_obj.get_beams_columns(type_=1)
     assert len(beams) == len(columns) == 0
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_columns_type_names():
+    col_type_names = etabs.frame_obj.get_columns_type_names()
+    assert len(col_type_names) == 11
+    assert col_type_names['C5'] == ['107', '245', '199', '153', None]
+    assert col_type_names['C3'] == ['105', '243', '197', '151', '288']
+
+def test_get_columns_type_sections():
+    col_type_section, _ = etabs.frame_obj.get_columns_type_sections()
+    assert len(col_type_section) == 11
+    assert col_type_section['C5'] == ['C5016F20', 'C4512F18', 'C4012F16', 'C3510F16', None]
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_section_area():
+    etabs.set_current_unit('kgf', 'cm')
+    areas = etabs.frame_obj.get_section_area()
+    assert isinstance(areas, dict)
+    assert len(areas) == 149
+    assert areas['B25X40'] == 1000
+
+@open_etabs_file('shayesteh.EDB')
+def test_set_pier():
+    names = (103, 104)
+    pier_name = 'P1'
+    etabs.frame_obj.set_pier(names, pier_name)
+    for name in names:
+        p_name = etabs.SapModel.FrameObj.GetPier(str(name))[0]
+        assert p_name == pier_name 
+    
+
 
 
 @open_etabs_file('shayesteh.EDB')
@@ -49,7 +91,59 @@ def test_get_beams_columns_weakness_structure():
     assert len(col_fields) == 5
     assert len(beam_fields) == 9
     assert len(cols_pmm) == 11
-    # assert len(beams_rebars) == 217
+
+@open_etabs_file('zibaei.EDB')
+def test_get_beams_columns_weakness_structure_dynamic_angular():
+    if version < 20:
+        assert True
+        return
+    d = {}
+    d["ex_combobox"] = 'EX'
+    d["ey_combobox"] = 'EY'
+    d["x_scalefactor_combobox"] = "1"
+    d["y_scalefactor_combobox"] = "1"
+    d["combination_response_spectrum_checkbox"] = False
+    d["angular_response_spectrum_checkbox"] = True
+    d_angles = {}
+    for angle in range(0, 180, 15):
+        d_angles[angle] = [ f"SEC{angle}", f"SPECT{angle}"]
+    d["angular_tableview"] = d_angles
+    cols_pmm, col_fields, beams_rebars, beam_fields = etabs.frame_obj.get_beams_columns_weakness_structure(
+        '67',
+        dynamic=True,
+        d = d,
+        )
+    assert isinstance(cols_pmm, list)
+    assert isinstance(beams_rebars, list)
+    assert len(col_fields) == 5
+    assert len(beam_fields) == 9
+    assert len(cols_pmm) == 16
+
+@open_etabs_file('shayesteh.EDB')
+def test_get_beams_columns_weakness_structure_dynamic_combination():
+    if version < 20:
+        assert True
+        return
+    d = {}
+    d["ex_combobox"] = 'QX'
+    d["ey_combobox"] = 'QY'
+    d["sx_combobox"] = "SX"
+    d["sxe_combobox"] = "SX"
+    d["sy_combobox"] = "SY"
+    d["sye_combobox"] = "SY"
+    d["x_scalefactor_combobox"] = "1"
+    d["y_scalefactor_combobox"] = "1"
+    d["combination_response_spectrum_checkbox"] = True
+    cols_pmm, col_fields, beams_rebars, beam_fields = etabs.frame_obj.get_beams_columns_weakness_structure(
+        '115',
+        dynamic=True,
+        d = d,
+        )
+    assert isinstance(cols_pmm, list)
+    assert isinstance(beams_rebars, list)
+    assert len(col_fields) == 5
+    assert len(beam_fields) == 9
+    assert len(cols_pmm) == 11
 
 @open_etabs_file('shayesteh.EDB')
 def test_set_constant_j():
@@ -216,6 +310,15 @@ def test_assign_frame_modifiers_mass():
     assert modifier == 0.75
 
 @open_etabs_file('shayesteh.EDB')
+def test_multiply_modifiers():
+    beams, columns = etabs.frame_obj.get_beams_columns(type_=2)
+    etabs.frame_obj.set_constant_j(.1)
+    etabs.frame_obj.multiply_modifiers(frame_names=beams)
+    for beam in beams:
+        modifiers = etabs.SapModel.FrameObj.GetModifiers(beam)[0]
+        math.isclose(modifiers[3], 0.14, abs_tol=.001)
+
+@open_etabs_file('shayesteh.EDB')
 def test_assign_frame_modifiers():
     i33_beam = 0.5
     i33_column = 0.7
@@ -302,6 +405,17 @@ def test_get_length_of_frame():
     assert pytest.approx(length, abs=.01) == 5.997
 
 @open_etabs_file('shayesteh.EDB')
+def test_get_offset_coordinate_of_beam_in_plan():
+    etabs.set_current_unit('kgf', 'cm')
+    dist = 20
+    x1, y1, z1, x2, y2, z2 = etabs.frame_obj.get_offset_coordinate_of_beam_in_plan(
+        '115',
+        dist,
+        )
+    assert y1 == y2 == 20
+    assert pytest.approx(z1, abs=.01) == z2
+
+@open_etabs_file('shayesteh.EDB')
 def test_set_end_length_offsets():
     etabs.frame_obj.set_end_length_offsets(0.5)
     table_key = 'Frame Assignments - End Length Offsets'
@@ -334,8 +448,98 @@ def test_assign_wall_loads_to_etabs():
     np.testing.assert_allclose(ret[10], -665)
     np.testing.assert_allclose(ret[11], -665)
 
+@open_etabs_file('steel.EDB')
+def test_set_lateral_bracing():
+    names = ['94', '95', '96']
+    ret = etabs.frame_obj.set_lateral_bracing(names)
+    assert set(ret) == {0}
+
+@open_etabs_file('steel.EDB')
+def test_get_section_type_and_geometry():
+    names = ['94', '95', '96']
+    ret = etabs.frame_obj.get_section_type_and_geometry(names)
+    assert set(ret.keys()) == set(names)
+    for name in names:
+        assert ret[name]['sec_type'] == "WB"
+    assert len(ret) == len(names)
+
+@open_etabs_file('steel.EDB')
+def test_get_lateral_bracing():
+    etabs.set_current_unit('N', 'm')
+    name = '94'
+    ret = etabs.frame_obj.get_lateral_bracing(name)
+    assert ret[0] == []
+    assert ret[1] == []
+    etabs.frame_obj.set_lateral_bracing([name], 1, 3, 3, relative=False)
+    ret = etabs.frame_obj.set_lateral_bracing([name], 2, 1, 1, 2, relative=False)
+    assert set(ret) == {0}
+    ret = etabs.frame_obj.get_lateral_bracing(name)
+    assert set(ret[1]) == set([3])
+    assert [1,2] in ret[0]
+    assert 3 in ret[0]
+
+@open_etabs_file('steel.EDB')
+def test_group_stacked_columns_by_points_working():
+    etabs.frame_obj.group_stacked_columns_by_points()
+    assert True  # If no exception is raised, the test passes
+
+@open_etabs_file('steel.EDB')
+def test_stacked_columns_dataframe_by_points_working():
+    etabs.frame_obj.stacked_columns_dataframe_by_points()
+    assert True  # If no exception is raised, the test passes
+
+
+def test_group_stacked_columns_by_points():
+    # Points: Z values are floats
+    points_df = pd.DataFrame([
+        {'UniqueName': 1, 'X': 0, 'Y': 0, 'Z': 0.0},
+        {'UniqueName': 2, 'X': 0, 'Y': 0, 'Z': 3.0},
+        {'UniqueName': 3, 'X': 0, 'Y': 0, 'Z': 6.0},
+        {'UniqueName': 4, 'X': 0, 'Y': 0, 'Z': 9.0},
+        {'UniqueName': 5, 'X': 1, 'Y': 0, 'Z': 0.0},
+        {'UniqueName': 6, 'X': 1, 'Y': 0, 'Z': 3.0},
+    ])
+    # Columns: one stack of 3, one stack of 2
+    columns_df = pd.DataFrame([
+        {'UniqueName': 101, 'UniquePtI': 1, 'UniquePtJ': 2},
+        {'UniqueName': 102, 'UniquePtI': 2, 'UniquePtJ': 3},
+        {'UniqueName': 103, 'UniquePtI': 3, 'UniquePtJ': 4},
+        {'UniqueName': 201, 'UniquePtI': 5, 'UniquePtJ': 6},
+    ])
+    from frame_obj import FrameObj
+    frame_obj = FrameObj(etabs=None)
+    groups = frame_obj.group_stacked_columns_by_points(points_df=points_df, columns_df=columns_df)
+    # Should be two groups, one with 3 columns, one with 1
+    assert isinstance(groups, list)
+    assert any(len(g) == 3 for g in groups)
+    assert any(len(g) == 1 for g in groups)
+
+@open_etabs_file('shayesteh.EDB')
+def test_stacked_columns_dataframe_by_points():
+    points_df = pd.DataFrame([
+        {'UniqueName': 1, 'X': 0, 'Y': 0, 'Z': 0.0},
+        {'UniqueName': 2, 'X': 0, 'Y': 0, 'Z': 3.0},
+        {'UniqueName': 3, 'X': 0, 'Y': 0, 'Z': 6.0},
+        {'UniqueName': 4, 'X': 0, 'Y': 0, 'Z': 9.0},
+        {'UniqueName': 5, 'X': 1, 'Y': 0, 'Z': 0.0},
+        {'UniqueName': 6, 'X': 1, 'Y': 0, 'Z': 3.0},
+    ])
+    columns_df = pd.DataFrame([
+        {'UniqueName': 101, 'UniquePtI': 1, 'UniquePtJ': 2},
+        {'UniqueName': 102, 'UniquePtI': 2, 'UniquePtJ': 3},
+        {'UniqueName': 103, 'UniquePtI': 3, 'UniquePtJ': 4},
+        {'UniqueName': 201, 'UniquePtI': 5, 'UniquePtJ': 6},
+    ])
+    df = etabs.frame_obj.stacked_columns_dataframe_by_points(points_df=points_df, columns_df=columns_df)
+    # Should have 3 rows (excluding lowest Z=0.0), and 2 columns (2 stacks)
+    assert isinstance(df, pd.DataFrame)
+    assert df.shape[0] == 3
+    assert df.shape[1] == 2
+    print(df)
+
+
 if __name__ == '__main__':
-    test_assign_wall_loads_to_etabs()
+    test_stacked_columns_dataframe_by_points()
 
 
 

@@ -63,6 +63,13 @@ class LoadPatterns:
                 names.append(lp)
         return names
         
+    def get_notional_load_pattern_names(self):
+        '''
+        notional loadType number is 12
+        '''
+        n = self.map_pattern_to_number.get("Notional", 12)
+        return self.get_special_load_pattern_names(n)
+    
     def get_drift_load_pattern_names(self):
         '''
         Drift loadType number is 37 in etabs v19 and 61 in etabs v20
@@ -292,7 +299,7 @@ class LoadPatterns:
         for name in names:
             if name in df.Name.unique():
                 ser = df[df['Name'] == name]['C']
-                c.append(float(ser.values))
+                c.append(float(ser.values[0]))
         return c
     
     def get_expanded_seismic_load_patterns(self) -> tuple:
@@ -356,6 +363,13 @@ class LoadPatterns:
         drift_load_pattern_names = self.get_drift_load_pattern_names()
         xy_names = x_names.union(y_names).difference(drift_load_pattern_names)
         return xy_names
+    
+    def get_xy_seismic_load_patterns_separate(self, only_ecc=False):
+        x_names, y_names = self.get_load_patterns_in_XYdirection(only_ecc)
+        drift_load_pattern_names = self.get_drift_load_pattern_names()
+        x_names = x_names.difference(drift_load_pattern_names)
+        y_names = y_names.difference(drift_load_pattern_names)
+        return x_names, y_names
       
     def select_all_load_patterns(self):
         load_pattern_names = list(self.get_load_patterns())
@@ -378,10 +392,6 @@ class LoadPatterns:
             return False
         for name in names:
             self.SapModel.LoadPatterns.Add(name, type_)
-            self.SapModel.LoadCases.StaticLinear.SetCase(name)
-            self.SapModel.LoadCases.StaticLinear.SetLoads(
-                name, 1, ('Load',), (name,), (1.0,))
-
         return True
     
     def add_notional_loads(self,

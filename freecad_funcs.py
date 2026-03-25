@@ -2,11 +2,18 @@ import os, sys, subprocess
 from typing import Union
 from pathlib import Path
 
-from PySide2.QtWidgets import QMessageBox, QFileDialog
+try:
+    from PySide.QtGui import QMessageBox, QFileDialog
 
-import FreeCAD
-import FreeCADGui
-import Part
+
+    import FreeCAD
+    import FreeCADGui
+    import Part
+    from PySide import QtCore
+    from PySide2 import QtWidgets
+except ModuleNotFoundError:
+    pass
+
 
 import pandas as pd
 
@@ -92,8 +99,8 @@ def add_dock_widget(
         if not vm.isVisible():
             vm.show()
     else:
-        from PySide2 import QtCore, QtWidgets
-        vm = QtWidgets.QDockWidget()
+        from PySide import QtCore, QtGui
+        vm = QtGui.QDockWidget()
 
         # create the dialog
         # dialog = FreeCADGui.PySideUic.loadUi(ui)
@@ -398,6 +405,17 @@ def install_package(package_name:str):
     import subprocess
     subprocess.check_call(['python', "-m", "pip", "install", package_name])
 
+def install_packages(package_names:Union[str, list]):
+    if QMessageBox.question(
+        None,
+        'Install Package', f"Package {','.join(package_names)} must be installed, Do you want to install?",
+        ) == QMessageBox.No:
+            return
+    if isinstance(package_names, str):
+        package_names = [package_names]
+    import subprocess
+    subprocess.check_call(['python', "-m", "pip", "install", ' '.join(package_names)])
+
 def add_to_clipboard(text):
     df=pd.DataFrame([text])
     df.to_clipboard(index=False,header=False)
@@ -465,3 +483,13 @@ def get_relative_dists(wall):
     dist2 = round((v2.Length / base.Length).Value, 3)
     assert max(dist1, dist2) <= 1
     return dist1, dist2
+
+def restart_freecad(check_test: bool=True):
+    if check_test and os.environ.get('TEST_CIVILTOOLS', 'No') in ('Yes', 'yes'):
+        return
+    args = QtWidgets.QApplication.arguments()[1:]
+    # FreeCADGui.getMainWindow().deleteLater()
+    if FreeCADGui.getMainWindow().close():
+        QtCore.QProcess.startDetached(
+            QtWidgets.QApplication.applicationFilePath(), args
+        )

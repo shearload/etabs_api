@@ -225,6 +225,30 @@ def test_centroid_of_polygon():
     np.testing.assert_almost_equal(x, 35, decimal=0)
     np.testing.assert_almost_equal(y, 100.4614, decimal=4)
 
+@open_etabs_file('two_earthquakes.EDB')
+def test_set_pier():
+    names = (373, 374)
+    pier_name = 'P1'
+    etabs.frame_obj.set_pier(names, pier_name)
+    for name in names:
+        p_name = etabs.SapModel.AreaObj.GetPier(str(name))[0]
+        assert p_name == pier_name
+
+@open_etabs_file('two_earthquakes.EDB')
+def test_get_piers():
+    n = len(etabs.area.get_names_of_areas_of_type('wall'))
+    ret = etabs.area.get_piers()
+    assert len(ret) == n
+
+@open_etabs_file('two_earthquakes.EDB')
+def test_get_all_names():
+    ret = etabs.area.get_all_names()
+    assert len(ret) == 719
+
+@open_etabs_file('two_earthquakes.EDB')
+def test_get_label_and_story_from_names():
+    ret = etabs.area.get_label_and_story_from_names()
+    assert len(ret) == 719
 
 
 if __name__ == '__main__':

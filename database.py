@@ -17,8 +17,8 @@ class DatabaseTables:
                 SapModel=None,
                 etabs=None,
                 ):
+        self.etabs = etabs
         if not SapModel:
-            self.etabs = etabs
             self.SapModel = etabs.SapModel
         else:
             self.SapModel = SapModel
@@ -47,6 +47,25 @@ class DatabaseTables:
         if table_key in all_table:
             return True
         return False
+    
+    def table_names_that_containe(self, partial_str):
+        all_table = self.SapModel.DatabaseTables.GetAvailableTables()[1]
+        return [item for item in all_table if partial_str in item]
+    
+    def table_name_that_containe(self, partial_str):
+        names = self.table_names_that_containe(partial_str)
+        if len(names) == 1:
+            return names[0]
+        print(f"The Table that contains {partial_str} did not exists.")
+        return None
+
+    def table_name_that_containe_texts(self, partial_strings: str):
+        names = self.table_names_that_containe(partial_strings[0])
+        for name in names:
+            if all(partial_str in name for partial_str in partial_strings):
+                return name
+        print(f"The Table that contains {' '.join(partial_strings)} did not exists.")
+        return None
 
     def read(self,
                 table_key : str,
@@ -55,6 +74,7 @@ class DatabaseTables:
                 ):
         ret = self.read_table(table_key)
         if not ret:
+            print(f"There is no table data with '{table_key}'")
             return None
         _, _, fields, _, data, _ = ret
         if fields[0] is None:
@@ -90,7 +110,9 @@ class DatabaseTables:
             data : Union[list, pd.core.frame.DataFrame],
             fields : Union[list, tuple, bool] = None,
             ) -> tuple:
-        if type(data) == pd.core.frame.DataFrame:
+        if isinstance(data, pd.core.frame.DataFrame):
+            data = data.fillna(value='')
+            data = data.astype(str)
             if fields is None:
                 fields, data = self.get_fields_and_data_from_dataframe(data)
             else:
@@ -145,13 +167,7 @@ class DatabaseTables:
             loads_type : dict = {},
             ):
         if self.etabs.etabs_main_version < 20:
-            new_columns = copy.deepcopy(self.etabs.auto_seismic_user_coefficient_columns_part1)
-            if len(df.columns) == len(new_columns) + 2:
-                new_columns.extend(['C', 'K'])
-            else:
-                new_columns.extend(self.etabs.auto_seismic_user_coefficient_columns_part2 + ['C', 'K'])
-            assert len(df.columns) == len(new_columns)
-            df.columns = new_columns
+            df = df.rename(columns=self.etabs.auto_seismic_user_coefficient_columns)
         # create new load patterns
         x, y = self.etabs.load_patterns.get_load_patterns_in_XYdirection()
         current_names = x.union(y)
@@ -536,9 +552,37 @@ class DatabaseTables:
         df_include = df_include.explode(col_name)
         new_df = df_not_include.append(df_include)
         return new_df
+    
+    def get_story_mass_as_dict(self,
+                               unit: tuple=('kgf', 'm'),
+                               ) -> dict:
+        self.etabs.set_current_unit(*unit)
+        self.etabs.run_analysis()
+        table_key = 'Centers Of Mass And Rigidity'
+        df = self.read(table_key, to_dataframe=True, cols=['Story', 'MassX'])
+        df['MassX'] = df['MassX'].astype(float)
+        d = df.groupby('Story').sum().to_dict()
+        return d.get('MassX', {})
+    
+    def get_cumulative_story_mass(self,
+                                  reversed: bool=True,
+                                  unit: tuple=('kgf', 'm'),
+                                  ) -> dict:
+        '''
+        return cumulative story mass
+        '''
+        cum_story_mass = dict()
+        story_masses = self.get_story_mass_as_dict(unit=unit)
+        stories = self.etabs.story.get_sorted_story_name(reverse=reversed, include_base=False)
+        cum_mass = 0
+        for story in stories:
+            cum_mass += story_masses.get(story)
+            cum_story_mass[story] = cum_mass
+        return cum_story_mass
 
-    def get_story_mass(self):
-        self.etabs.set_current_unit('kgf', 'm')
+    def get_story_mass(self, unit: tuple=('kgf', 'm')):
+        if unit is not None:
+            self.etabs.set_current_unit(*unit)
         self.etabs.run_analysis()
         TableKey = 'Centers Of Mass And Rigidity'
         [_, _, FieldsKeysIncluded, _, TableData, _] = self.read_table(TableKey)
@@ -682,22 +726,25 @@ class DatabaseTables:
         return story_rigidity
 
     def get_stories_displacement_in_xy_modes(self):
-        f1, _ = self.etabs.save_as('modal_stiffness.EDB')
+        asli_file_path, _ = self.etabs.save_in_folder_and_add_name(
+            folder_name = 'story_stiffness',
+            name = 'modal_stiffness',
+            )
         story_point = self.etabs.story.add_points_in_center_of_rigidity_and_assign_diph()
         modal = self.etabs.load_cases.get_modal_loadcase_name()
         self.etabs.analyze.set_load_cases_to_analyze([modal])
         self.SapModel.Analyze.RunAnalysis()
         wx, wy, ix, iy = self.etabs.results.get_xy_frequency()
-        TableKey = 'Joint Displacements'
-        [_, _, FieldsKeysIncluded, _, TableData, _] = self.read_table(TableKey)
-        data = self.reshape_data(FieldsKeysIncluded, TableData)
-        i_story = FieldsKeysIncluded.index('Story')
-        i_name = FieldsKeysIncluded.index('UniqueName')
-        i_case = FieldsKeysIncluded.index('OutputCase')
-        i_steptype = FieldsKeysIncluded.index('StepType')
-        i_stepnumber = FieldsKeysIncluded.index('StepNumber')
-        i_ux = FieldsKeysIncluded.index('Ux')
-        i_uy = FieldsKeysIncluded.index('Uy')
+        table_key = 'Joint Displacements'
+        [_, _, fields_keys_included, _, table_data, _] = self.read_table(table_key)
+        data = self.reshape_data(fields_keys_included, table_data)
+        i_story = fields_keys_included.index('Story')
+        i_name = fields_keys_included.index('UniqueName')
+        i_case = fields_keys_included.index('OutputCase')
+        i_steptype = fields_keys_included.index('StepType')
+        i_stepnumber = fields_keys_included.index('StepNumber')
+        i_ux = fields_keys_included.index('Ux')
+        i_uy = fields_keys_included.index('Uy')
         columns = (i_story, i_name, i_case, i_steptype, i_stepnumber)
         x_results = {}
         for story, point in story_point.items():
@@ -715,7 +762,7 @@ class DatabaseTables:
             assert len(result) == 1
             uy = float(result[0][i_uy])
             y_results[story] = uy
-        self.SapModel.File.OpenFile(str(f1))
+        self.SapModel.File.OpenFile(str(asli_file_path))
         return x_results, y_results, wx, wy
 
     def multiply_seismic_loads(
@@ -725,6 +772,7 @@ class DatabaseTables:
             ):
         if not y:
             y = x
+        print(f"Multiplying 'X' dir earthquakes with {x} and 'Y' dir earthquakes with {y}")
         self.SapModel.SetModelIsLocked(False)
         self.etabs.lock_and_unlock_model()
         self.etabs.load_patterns.select_all_load_patterns()
@@ -774,6 +822,32 @@ class DatabaseTables:
         result = self.etabs.get_from_list_table(data, columns, values)
         story_forces = list(result)
         return story_forces, loadcases, FieldsKeysIncluded
+    
+    def get_story_forces_of_loadcases(
+                    self,
+                    loadcases: list=None,
+                    unit: tuple=('kgf', 'm')
+                    ):
+        if not loadcases:
+            loadcases = self.etabs.get_first_system_seismic()
+        all_loadcases = self.etabs.load_cases.get_load_cases()
+        invalid_cases = [lc for lc in loadcases if lc not in all_loadcases]
+        if invalid_cases:
+            raise NameError(f"Invalid load cases: {invalid_cases} (Available: {all_loadcases})")
+        self.etabs.run_analysis()
+        self.etabs.set_current_unit(*unit)
+        self.etabs.load_cases.select_load_cases(loadcases)
+        table_key = 'Story Forces'
+        df = self.read(table_key, to_dataframe=True, cols=['Story', 'OutputCase', 'Location', 'VX', 'VY']).query("Location == 'Bottom'")
+        del df['Location']
+        df[['VX', 'VY']] = df[['VX', 'VY']].astype(float)
+        story_forces = {}
+        for i, row in df.iterrows():
+            story, lc, vx, vy = row
+            d = story_forces.get(lc, {})
+            d[story] = [vx, vy]
+            story_forces[lc] = d
+        return story_forces
 
     def select_design_load_combinations(self,
             types : list = ['concrete'],
@@ -850,9 +924,13 @@ class DatabaseTables:
         table_key = 'Concrete Frame Design Load Combination Data'
         df = self.read(table_key, to_dataframe=True)
         return list(df['ComboName'])
+    
+    def get_steel_frame_design_load_combinations(self):
+        return self.get_design_load_combinations(type_='steel', combo_types=['Strength'])
 
     def get_design_load_combinations(self,
             type_ : str = 'concrete', # 'steel', 'shearwall', 'slab'
+            combo_types: list = ['Strength', 'Deflection']
             ):
         if type_ == 'concrete':
             table_key = 'Concrete Frame Design Load Combination Data'
@@ -865,15 +943,32 @@ class DatabaseTables:
         df = self.read(table_key, to_dataframe=True)
         if df is None:
             return None
+        if combo_types and 'ComboType' in df.columns:
+            filt = df['ComboType'].isin(combo_types)
+            df = df.loc[filt]
         if type_ == 'steel':
             df = df[df['DesignType'] == 'Steel Frame']
         return list(df['ComboName'])
 
+    def create_section_cuts_sap(self,
+            group : str,
+            prefix : str = 'SEC',
+            angles : list = range(0, 180, 15),
+            ):
+        for angle in angles:
+            name = f'{prefix}{angle}'
+            self.SapModel.SectCut.SetByGroup(name, group, 1)
+            self.SapModel.SectCut.SetLocalAxesAnalysis (name, angle, 0, 0)
+        
+        
     def create_section_cuts(self,
             group : str,
             prefix : str = 'SEC',
             angles : list = range(0, 180, 15),
             ):
+        if self.etabs.software == "SAP2000":
+            self.create_section_cuts_sap(group, prefix, angles)
+            return True
         if self.etabs.etabs_main_version < 20:
             fields = ('Name', 'Defined By', 'Group', 'Result Type', 'Result Location', 'Rotation About Z', 'Rotation About Y', 'Rotation About X')
         else:
@@ -897,6 +992,13 @@ class DatabaseTables:
         table_key = 'Section Cut Definitions'
         self.write(table_key, data, fields)
 
+    def get_section_cuts_sap(self):
+        try:
+            ret = self.SapModel.SectCut.GetNameList()[1]
+        except:
+            ret = []
+        return ret
+    
     def get_section_cuts(self, cols=['Name', 'Group', 'RotAboutZ']):
         table = 'Section Cut Definitions'
         df = self.read(table, to_dataframe=True, cols=cols)
